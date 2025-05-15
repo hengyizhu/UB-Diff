@@ -1,6 +1,6 @@
 import torch
 from dataset import S_dataset
-from model.vsnet import VSNet
+from vsnet import VSNet
 from torch.utils.data import RandomSampler, DataLoader, random_split
 import os
 import utils
@@ -230,7 +230,7 @@ def main(args):
     device = torch.device(args.device)
     torch.backends.cudnn.benchmark = True
 
-    with open('dataset_config.json') as f:
+    with open('model/dataset_config.json') as f:
         try:
             ctx = json.load(f)[args.dataset]
         except KeyError:

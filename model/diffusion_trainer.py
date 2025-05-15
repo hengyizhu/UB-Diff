@@ -4,7 +4,7 @@ from random import random
 from functools import partial
 from multiprocessing import cpu_count
 from torch.utils.data import RandomSampler, DataLoader, random_split
-
+import os
 
 import torch
 from torch import nn, einsum
@@ -28,14 +28,40 @@ from tqdm.auto import tqdm
 from ema_pytorch import EMA
 
 from accelerate import Accelerator
+from experiment_log import PytorchExperimentLogger
 
 import numpy as np
-from ddpm_1d import has_int_squareroot, cycle, exists, num_to_groups, default, extract, convert_image_to_fn
 from torchvision.transforms import Compose
 import json
 import sys
-import os
-from experiment_log import PytorchExperimentLogger
+
+
+def exists(x):
+    return x is not None
+
+def cycle(dl):
+    while True:
+        for data in dl:
+            yield data
+
+def has_int_squareroot(num):
+    return (math.sqrt(num) ** 2) == num
+
+def num_to_groups(num, divisor):
+    groups = num // divisor
+    remainder = num % divisor
+    arr = [divisor] * groups
+    if remainder > 0:
+        arr.append(remainder)
+    return arr
+
+# normalization functions
+
+def normalize_to_neg_one_to_one(img):
+    return img * 2 - 1
+
+def unnormalize_to_zero_to_one(t):
+    return (t + 1) * 0.5
 
 
 class Trainer1D(object):
@@ -74,7 +100,7 @@ class Trainer1D(object):
         # model
         self.exp_logger = PytorchExperimentLogger('./log', "elog", ShowTerminal=True)
 
-        with open('dataset_config.json') as f:
+        with open('model/dataset_config.json') as f:
             try:
                 ctx = json.load(f)[dataset]
             except KeyError:
@@ -201,6 +227,10 @@ class Trainer1D(object):
         all_s = Tr.tonumpy_denormalize(s, self.ctx['data_min'], self.ctx['data_max'])
 
         all_v = all_v.cpu().numpy()
+
+        # 确保保存目录存在
+        os.makedirs(str(s_path), exist_ok=True)
+        os.makedirs(str(v_path), exist_ok=True)
 
         save_path_v = str(v_path) + f'/gen_vel-{milestone}-{idx}.npy'
         save_path_s = str(s_path) + f'/gen_seis-{milestone}-{idx}.npy'

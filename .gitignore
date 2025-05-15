@@ -1,0 +1,12 @@
+# 忽略数据集
+seismic_data/
+velocity_map/
+
+# 忽略 _pycache_
+__pycache__/
+
+# 忽略 _checkpoints_
+checkpoints/
+
+# 忽略日志
+log/

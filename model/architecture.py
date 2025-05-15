@@ -35,7 +35,7 @@ class UB_Diff(nn.Module):
 
         original_params = copy.deepcopy(self.encoder.state_dict())
         if checkpoint_path:
-            checkpoint = torch.load(checkpoint_path, map_location='cuda')
+            checkpoint = torch.load(checkpoint_path, map_location='cuda', weights_only=False)
             model = VSNet(in_channels= 1, out_channels_s=5, out_channels_v=1, dim5=self.dim5)
             self.out_channels_s = model.out_channels_s
             self.out_channels_v = model.out_channels_v
@@ -79,7 +79,7 @@ class UB_Diff(nn.Module):
         original_params_b_v = copy.deepcopy(self.batch_norm_v.state_dict())
 
         if checkpoint_path:
-            checkpoint = torch.load(checkpoint_path, map_location='cuda')
+            checkpoint = torch.load(checkpoint_path, map_location='cuda', weights_only=False)
             model = VSNet(in_channels= 1, out_channels_s=5, out_channels_v=1, dim5=self.dim5)
             model.load_state_dict(checkpoint['model'])
 

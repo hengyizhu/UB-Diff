@@ -237,7 +237,7 @@ def main(args):
     device = torch.device(args.device)
     torch.backends.cudnn.benchmark = True
 
-    with open('dataset_config.json') as f:
+    with open('model/dataset_config.json') as f:
         try:
             ctx = json.load(f)[args.dataset]
         except KeyError:
@@ -312,7 +312,7 @@ def main(args):
     if args.resume:
         print("resume...")
         print(args.resume)
-        checkpoint = torch.load(args.resume, map_location='cuda')
+        checkpoint = torch.load(args.resume, map_location='cuda', weights_only=False)
         model = VSNet(in_channels=1, out_channels_s=5, out_channels_v=1, dim5=args.latent_dim).to(device)
         model.load_state_dict(checkpoint['model'])
     else:

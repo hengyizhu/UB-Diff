@@ -16,7 +16,7 @@ def parse_args():
     import argparse
     parser = argparse.ArgumentParser(description='Diffusion Training')
     parser.add_argument('-d', '--device', default='cuda', help='device')
-    parser.add_argument('-c', '--checkpoint_path', default='../encoder_decoder/checkpoints/24k_v_5k_p/ft_check_point.pth', type=str, help='checkpoint path')
+    parser.add_argument('-c', '--checkpoint_path', default='./checkpoints/24k_v_5k_p/ft_model_10.pth', type=str, help='checkpoint path')
     parser.add_argument('-s', '--save_path', default='./gen_data', type=str, help='save path')
     parser.add_argument('-n', '--num_samples', default=500, type=int, help='number of samples')
     parser.add_argument('-b', '--batch_size', default=16, type=int, help='batch size')
