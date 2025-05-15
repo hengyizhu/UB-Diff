@@ -1,6 +1,6 @@
 import torch
 from dataset import S_dataset
-from vsnet import VSNet
+from model.vsnet import VSNet
 from torch.utils.data import RandomSampler, DataLoader, random_split
 import os
 import utils
