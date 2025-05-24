@@ -1,12 +1,16 @@
 # 忽略数据集
-seismic_data/
-velocity_map/
+CurveFault-A/
 
 # 忽略 _pycache_
 __pycache__/
 
 # 忽略 _checkpoints_
 checkpoints/
+checkpoints.old/
 
 # 忽略日志
 log/
+wandb/
+
+# 忽略生成数据
+generated_data/
