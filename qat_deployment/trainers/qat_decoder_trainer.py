@@ -93,6 +93,9 @@ class QATDecoderTrainer:
         # 冻结地震解码器路径
         self.model.freeze_seismic_path()
         
+        # 重新创建优化器，只包含需要梯度的参数
+        self._recreate_optimizer()
+        
         print("开始训练速度解码器（QAT）...")
         
         for epoch in range(epochs):
@@ -150,9 +153,15 @@ class QATDecoderTrainer:
         """
         os.makedirs(checkpoint_dir, exist_ok=True)
         
+        # 先解冻地震解码路径（如果之前被冻结）
+        self.model.unfreeze_seismic_path()
+        
         # 根据需要冻结速度解码器
         if freeze_velocity:
             self.model.freeze_velocity_path()
+        
+        # 重新创建优化器，只包含需要梯度的参数
+        self._recreate_optimizer()
         
         print("开始训练地震解码器（QAT）...")
         
@@ -337,4 +346,27 @@ class QATDecoderTrainer:
         self.current_epoch = checkpoint.get('epoch', 0)
         self.best_loss = checkpoint.get('best_loss', float('inf'))
         print(f"检查点已加载: {path}")
-        return checkpoint 
+        return checkpoint
+
+    def _recreate_optimizer(self):
+        """重新创建优化器，只包含需要梯度的参数"""
+        # 获取当前学习率和权重衰减
+        current_lr = self.optimizer.param_groups[0]['lr']
+        current_weight_decay = self.optimizer.param_groups[0]['weight_decay']
+        
+        # 筛选出需要梯度的参数
+        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+        
+        print(f"重新创建优化器: {len(trainable_params)} 个可训练参数")
+        
+        # 重新创建优化器
+        self.optimizer = optim.Adam(
+            trainable_params,
+            lr=current_lr,
+            weight_decay=current_weight_decay
+        )
+        
+        # 重新创建学习率调度器
+        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer, mode='min', factor=0.5, patience=10
+        ) 

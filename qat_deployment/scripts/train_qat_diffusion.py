@@ -68,6 +68,12 @@ def parse_args():
     parser.add_argument('--backend', type=str, default='qnnpack',
                         choices=['qnnpack', 'fbgemm'],
                         help='量化后端')
+    parser.add_argument('--convert_conv1d', action='store_true',
+                        help='是否转换1D卷积为2D卷积以获得更好的量化支持')
+    parser.add_argument('--use_aggressive_quantization', action='store_true',
+                        help='是否使用更激进的量化配置')
+    parser.add_argument('--quantization_warmup_epochs', type=int, default=10,
+                        help='量化预热轮数，在此期间逐渐启用量化')
     
     # 其他参数
     parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints/qat_diffusion',
@@ -93,7 +99,7 @@ def load_encoder(pretrained_path: str, device: str) -> torch.nn.Module:
         encoder_dim=512,
         velocity_channels=1,
         seismic_channels=5,
-        dim_mults=(1, 2, 2, 2)
+        dim_mults=(1, 2, 4, 8)
     )
     
     checkpoint = torch.load(pretrained_path, map_location='cpu', weights_only=False)
@@ -131,7 +137,7 @@ def create_simple_dataloader(seismic_path: str, velocity_path: str,
         seismic_transform=seismic_transform,
         velocity_transform=velocity_transform,
         fault_family=fault_family,
-        preload=False
+        preload=True
     )
     
     # 创建数据加载器
@@ -175,7 +181,7 @@ def main():
     encoder = load_encoder(args.pretrained_path, device)
     
     # 创建量化模型
-    print("创建量化UB-Diff模型...")
+    print("=== 创建改进的量化UB-Diff模型 ===")
     model = QuantizedUBDiff(
         encoder_dim=args.encoder_dim,
         velocity_channels=1,
@@ -207,29 +213,54 @@ def main():
     decoder_checkpoint = torch.load(args.decoder_checkpoint, map_location='cpu')
     decoder_state = decoder_checkpoint['model_state_dict']
     
-    # 映射解码器权重
+    # 映射解码器权重 - 修复：避免在遍历时修改字典
+    new_decoder_state = {}
     for key, value in decoder_state.items():
         if not key.startswith('decoder.'):
-            decoder_state[f'decoder.{key}'] = value
-            del decoder_state[key]
+            new_decoder_state[f'decoder.{key}'] = value
+        else:
+            new_decoder_state[key] = value
     
-    model.load_state_dict(decoder_state, strict=False)
+    model.load_state_dict(new_decoder_state, strict=False)
     
-    # 准备扩散模型的QAT
+    # 应用改进的量化策略
     if args.quantize_diffusion:
-        print(f"准备扩散模型的量化感知训练，后端: {args.backend}")
-        # 只对扩散部分准备QAT
-        torch.backends.quantized.engine = args.backend
-        qconfig = quant.get_default_qat_qconfig(args.backend)
+        print(f"\n=== 应用改进的量化策略 ===")
+        print(f"量化后端: {args.backend}")
+        print(f"转换1D卷积: {args.convert_conv1d}")
+        print(f"激进量化: {args.use_aggressive_quantization}")
         
-        # 为扩散模型设置量化配置
-        model.diffusion.qconfig = qconfig
-        model.unet.qconfig = qconfig
+        # 使用改进的量化方法
+        quantization_report = model.apply_improved_quantization(
+            backend=args.backend,
+            convert_conv1d=args.convert_conv1d,
+            use_aggressive_config=args.use_aggressive_quantization
+        )
         
-        # 准备QAT
-        model.train()
-        quant.prepare_qat(model.diffusion, inplace=True)
-        quant.prepare_qat(model.unet, inplace=True)
+        # 保存量化报告
+        os.makedirs(args.checkpoint_dir, exist_ok=True)
+        report_path = os.path.join(args.checkpoint_dir, 'quantization_analysis.txt')
+        with open(report_path, 'w', encoding='utf-8') as f:
+            f.write("改进的量化分析报告\n")
+            f.write("=" * 30 + "\n\n")
+            
+            f.write("原始模型统计:\n")
+            for key, value in quantization_report['original'].items():
+                f.write(f"  {key}: {value}\n")
+            
+            f.write("\n改进后模型统计:\n")
+            for key, value in quantization_report['improved'].items():
+                f.write(f"  {key}: {value}\n")
+            
+            if quantization_report['converted_conv1d'] > 0:
+                f.write(f"\n✓ 成功转换 {quantization_report['converted_conv1d']} 个1D卷积层\n")
+        
+        print(f"量化分析报告已保存到: {report_path}")
+    else:
+        print("跳过扩散模型量化")
+    
+    # 移动到设备
+    model = model.to(device)
     
     # 创建训练器
     trainer = QATDiffusionTrainer(

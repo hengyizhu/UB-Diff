@@ -1,10 +1,40 @@
 #!/bin/bash
 
-# UB-Diff 量化感知训练自动化脚本
-# 作者: 自动化脚本
-# 描述: 自动执行完整的QAT训练流程
+# QAT训练和部署流水线 - 改进版本
+# 集成改进的量化策略，提升量化效果
 
 set -e  # 遇到错误时退出
+
+echo "🚀 开始改进的QAT训练和部署流水线"
+echo "=================================="
+
+# 配置参数
+TRAIN_DATA="./CurveFault-A/seismic_data"
+TRAIN_LABEL="./CurveFault-A/velocity_map"
+VAL_DATA="./CurveFault-A/seismic_data"
+VAL_LABEL="./CurveFault-A/velocity_map"
+DATASET="curvefault-a"
+
+# 模型路径
+PRETRAINED_PATH="./checkpoints/diffusion/model-4.pt"
+
+# 训练参数
+BATCH_SIZE=64
+EPOCHS_DECODER=1
+EPOCHS_DIFFUSION=1  
+LR=5e-5        # 降低学习率
+DEVICE="cuda:1"
+
+# 改进的量化参数
+BACKEND="qnnpack"  # 适合ARM设备
+CONVERT_CONV1D=true
+USE_AGGRESSIVE_QUANTIZATION=true
+QUANTIZATION_WARMUP_EPOCHS=5
+
+# 输出目录
+DECODER_CHECKPOINT_DIR="./checkpoints/qat_decoders"
+DIFFUSION_CHECKPOINT_DIR="./checkpoints/qat_diffusion"
+EXPORT_DIR="./qat_deployment/exported_models"
 
 # 颜色输出函数
 RED='\033[0;31m'
@@ -33,19 +63,6 @@ print_separator() {
     echo "=================================================================="
 }
 
-# 默认配置参数
-TRAIN_DATA="./CurveFault-A/seismic_data"
-TRAIN_LABEL="./CurveFault-A/velocity_map"
-PRETRAINED_PATH="./checkpoints/diffusion/model-4.pt"
-DATASET="curvefault-a"
-DEVICE="cuda:1"
-VELOCITY_EPOCHS=5
-SEISMIC_EPOCHS=5
-DIFFUSION_EPOCHS=10
-DECODER_BATCH_SIZE=64
-DIFFUSION_BATCH_SIZE=16
-MODEL_NAME="ub_diff_rpi"
-
 # 检查点目录
 CHECKPOINTS_DIR="./checkpoints"
 QAT_DECODERS_DIR="${CHECKPOINTS_DIR}/qat_decoders"
@@ -63,15 +80,15 @@ UB-Diff QAT 自动训练脚本
     -h, --help              显示此帮助信息
     --train-data PATH       训练数据路径 (默认: $TRAIN_DATA)
     --train-label PATH      训练标签路径 (默认: $TRAIN_LABEL)
-    --pretrained PATH       预训练模型路径 (默认: $PRETRAINED_PATH)
+    --pretrained-path PATH  预训练模型路径 (默认: $PRETRAINED_PATH)
     --dataset NAME          数据集名称 (默认: $DATASET)
     --device DEVICE         设备 (默认: $DEVICE)
-    --velocity-epochs N     速度解码器训练轮数 (默认: $VELOCITY_EPOCHS)
-    --seismic-epochs N      地震解码器训练轮数 (默认: $SEISMIC_EPOCHS)
-    --diffusion-epochs N    扩散模型训练轮数 (默认: $DIFFUSION_EPOCHS)
-    --decoder-batch-size N  解码器批次大小 (默认: $DECODER_BATCH_SIZE)
-    --diffusion-batch-size N 扩散模型批次大小 (默认: $DIFFUSION_BATCH_SIZE)
-    --model-name NAME       导出模型名称 (默认: $MODEL_NAME)
+    --velocity-epochs N     速度解码器训练轮数 (默认: $EPOCHS_DECODER)
+    --seismic-epochs N      地震解码器训练轮数 (默认: $EPOCHS_DECODER)
+    --diffusion-epochs N    扩散模型训练轮数 (默认: $EPOCHS_DIFFUSION)
+    --decoder-batch-size N  解码器批次大小 (默认: $BATCH_SIZE)
+    --diffusion-batch-size N 扩散模型批次大小 (默认: $BATCH_SIZE)
+    --model-name NAME       导出模型名称 (默认: $DATASET)
     --skip-decoders         跳过解码器训练
     --skip-diffusion        跳过扩散模型训练
     --skip-export           跳过模型导出
@@ -109,6 +126,10 @@ while [[ $# -gt 0 ]]; do
             PRETRAINED_PATH="$2"
             shift 2
             ;;
+        --pretrained-path)
+            PRETRAINED_PATH="$2"
+            shift 2
+            ;;
         --dataset)
             DATASET="$2"
             shift 2
@@ -118,27 +139,27 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --velocity-epochs)
-            VELOCITY_EPOCHS="$2"
+            EPOCHS_DECODER="$2"
             shift 2
             ;;
         --seismic-epochs)
-            SEISMIC_EPOCHS="$2"
+            EPOCHS_DIFFUSION="$2"
             shift 2
             ;;
         --diffusion-epochs)
-            DIFFUSION_EPOCHS="$2"
+            EPOCHS_DIFFUSION="$2"
             shift 2
             ;;
         --decoder-batch-size)
-            DECODER_BATCH_SIZE="$2"
+            BATCH_SIZE="$2"
             shift 2
             ;;
         --diffusion-batch-size)
-            DIFFUSION_BATCH_SIZE="$2"
+            BATCH_SIZE="$2"
             shift 2
             ;;
         --model-name)
-            MODEL_NAME="$2"
+            DATASET="$2"
             shift 2
             ;;
         --skip-decoders)
@@ -208,12 +229,11 @@ show_config() {
     echo "预训练模型: $PRETRAINED_PATH"
     echo "数据集: $DATASET"
     echo "设备: $DEVICE"
-    echo "速度解码器轮数: $VELOCITY_EPOCHS"
-    echo "地震解码器轮数: $SEISMIC_EPOCHS"
-    echo "扩散模型轮数: $DIFFUSION_EPOCHS"
-    echo "解码器批次大小: $DECODER_BATCH_SIZE"
-    echo "扩散模型批次大小: $DIFFUSION_BATCH_SIZE"
-    echo "导出模型名称: $MODEL_NAME"
+    echo "速度解码器轮数: $EPOCHS_DECODER"
+    echo "地震解码器轮数: $EPOCHS_DIFFUSION"
+    echo "解码器批次大小: $BATCH_SIZE"
+    echo "扩散模型批次大小: $BATCH_SIZE"
+    echo "导出模型名称: $DATASET"
     print_separator
 }
 
@@ -241,9 +261,9 @@ train_qat_decoders() {
         --dataset "$DATASET" \
         --quantize_velocity \
         --quantize_seismic \
-        --velocity_epochs $VELOCITY_EPOCHS \
-        --seismic_epochs $SEISMIC_EPOCHS \
-        --batch_size $DECODER_BATCH_SIZE \
+        --velocity_epochs $EPOCHS_DECODER \
+        --seismic_epochs $EPOCHS_DIFFUSION \
+        --batch_size $BATCH_SIZE \
         --device "$DEVICE"
     
     local end_time=$(date +%s)
@@ -289,9 +309,15 @@ train_qat_diffusion() {
         --decoder_checkpoint "$decoder_checkpoint" \
         --dataset "$DATASET" \
         --quantize_diffusion \
-        --epochs $DIFFUSION_EPOCHS \
-        --batch_size $DIFFUSION_BATCH_SIZE \
-        --device "$DEVICE"
+        --backend "$BACKEND" \
+        --convert_conv1d \
+        --use_aggressive_quantization \
+        --quantization_warmup_epochs $QUANTIZATION_WARMUP_EPOCHS \
+        --epochs $EPOCHS_DIFFUSION \
+        --batch_size $BATCH_SIZE \
+        --lr $LR \
+        --device "$DEVICE" \
+        --checkpoint_dir "$DIFFUSION_CHECKPOINT_DIR"
     
     local end_time=$(date +%s)
     local duration=$((end_time - start_time))
@@ -327,8 +353,10 @@ export_model() {
     python qat_deployment/scripts/export_model.py \
         --checkpoint_path "$diffusion_checkpoint" \
         --output_dir "$EXPORTED_MODELS_DIR" \
-        --model_name "$MODEL_NAME" \
-        --backend qnnpack \
+        --model_name "$DATASET" \
+        --backend "$BACKEND" \
+        --convert_conv1d \
+        --force_quantization \
         --optimize_for_mobile \
         --test_generation
     
@@ -337,7 +365,7 @@ export_model() {
     
     if [[ $? -eq 0 ]]; then
         log_success "模型导出完成 (耗时: ${duration}秒)"
-        log_info "导出的模型位于: ${EXPORTED_MODELS_DIR}/${MODEL_NAME}.pt"
+        log_info "导出的模型位于: ${EXPORTED_MODELS_DIR}/${DATASET}.pt"
     else
         log_error "模型导出失败"
         exit 1
@@ -364,17 +392,17 @@ main() {
     print_separator
     log_success "QAT训练流程完成!"
     log_info "总耗时: ${total_duration}秒"
-    log_info "导出的模型: ${EXPORTED_MODELS_DIR}/${MODEL_NAME}.pt"
+    log_info "导出的模型: ${EXPORTED_MODELS_DIR}/${DATASET}.pt"
     
     # 显示模型信息
-    if [[ -f "${EXPORTED_MODELS_DIR}/${MODEL_NAME}.pt" ]]; then
-        local model_size=$(du -h "${EXPORTED_MODELS_DIR}/${MODEL_NAME}.pt" | cut -f1)
+    if [[ -f "${EXPORTED_MODELS_DIR}/${DATASET}.pt" ]]; then
+        local model_size=$(du -h "${EXPORTED_MODELS_DIR}/${DATASET}.pt" | cut -f1)
         log_info "模型大小: $model_size"
     fi
     
     print_separator
     log_info "下一步:"
-    echo "1. 将模型复制到树莓派: scp ${EXPORTED_MODELS_DIR}/${MODEL_NAME}.pt pi@your-rpi:/path/to/model/"
+    echo "1. 将模型复制到树莓派: scp ${EXPORTED_MODELS_DIR}/${DATASET}.pt pi@your-rpi:/path/to/model/"
     echo "2. 在树莓派上测试模型: python test_model.py"
     echo "3. 查看性能指标和使用说明: cat qat_deployment/README.md"
 }

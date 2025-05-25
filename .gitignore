@@ -6,7 +6,7 @@ __pycache__/
 
 # 忽略 _checkpoints_
 checkpoints/
-checkpoints.old/
+exported_models/
 
 # 忽略日志
 log/

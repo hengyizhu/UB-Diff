@@ -55,7 +55,7 @@ python scripts/train_encoder_decoder.py \
     --dataset curvefault-a \
     --epochs 10 \
     --batch_size 64 \
-    --lr 1e-4 \
+    --lr 5e-4 \
     --val_every 2 \
     --output_path ./checkpoints/encoder_decoder \
     --device cuda:1 \

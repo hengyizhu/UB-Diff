@@ -132,7 +132,7 @@ def create_simple_dataloader(seismic_path: str, velocity_path: str,
         seismic_transform=seismic_transform,
         velocity_transform=velocity_transform,
         fault_family=fault_family,
-        preload=False
+        preload=True
     )
     
     # 创建数据加载器
