@@ -40,11 +40,11 @@ def parse_arguments():
                        help='训练轮数')
     parser.add_argument('--batch_size', type=int, default=64,
                        help='批次大小')
-    parser.add_argument('--lr', type=float, default=1e-4,
+    parser.add_argument('--lr', type=float, default=5e-4,
                        help='学习率')
     parser.add_argument('--weight_decay', type=float, default=1e-4,
                        help='权重衰减')
-    parser.add_argument('--lr_gamma', type=float, default=0.98,
+    parser.add_argument('--lr_gamma', type=float, default=0.995,
                        help='学习率衰减因子')
     parser.add_argument('--lr_milestones', type=int, nargs='+', default=[],
                        help='学习率衰减里程碑')
