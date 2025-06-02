@@ -14,4 +14,3 @@ wandb/
 
 # 忽略生成数据
 generated_data/
-qat_diffusion_train.log
