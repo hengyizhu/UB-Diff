@@ -343,7 +343,7 @@ class QuantizedUBDiff(nn.Module):
         return velocity, seismic
     
     def load_pretrained_weights(self, checkpoint_path: str) -> None:
-        """从预训练模型加载权重
+        """从预训练模型加载权重（改进版本）
         
         Args:
             checkpoint_path: 检查点路径
@@ -359,23 +359,117 @@ class QuantizedUBDiff(nn.Module):
         else:
             state_dict = checkpoint
         
-        # 加载扩散模型权重
+        # 分别加载扩散模型和解码器权重
+        self._load_diffusion_weights(state_dict)
+        self._load_decoder_weights_improved(state_dict)
+        
+        print("预训练权重加载完成")
+
+    def _load_diffusion_weights(self, state_dict: dict) -> None:
+        """加载扩散模型权重"""
         diffusion_dict = {}
         for key, value in state_dict.items():
             if key.startswith('diffusion.') or key.startswith('unet.'):
                 diffusion_dict[key] = value
         
-        # 加载解码器权重
-        decoder_dict = {}
-        for key, value in state_dict.items():
-            if 'decoder' in key or 'projector' in key:
-                # 调整键名以匹配新结构
-                new_key = key.replace('dual_decoder.', 'decoder.')
-                decoder_dict[new_key] = value
+        if diffusion_dict:
+            missing_keys, unexpected_keys = self.load_state_dict(diffusion_dict, strict=False)
+            print(f"✅ 扩散模型权重已加载 ({len(diffusion_dict)} 个参数)")
+            if missing_keys:
+                print(f"  缺失的键: {len(missing_keys)}")
+            if unexpected_keys:
+                print(f"  意外的键: {len(unexpected_keys)}")
+
+    def _load_decoder_weights_improved(self, state_dict: dict) -> None:
+        """解码器权重加载（仅支持新格式）"""
+        # 收集新格式权重（dual_decoder.* 格式）
+        velocity_projector_dict = {}
+        velocity_decoder_dict = {}
+        seismic_projector_dict = {}
+        seismic_decoder_dict = {}
         
-        # 应用权重
-        self.load_state_dict({**diffusion_dict, **decoder_dict}, strict=False)
-        print("预训练权重加载完成")
+        for key, value in state_dict.items():
+            if key.startswith('dual_decoder.velocity_projector.'):
+                new_key = key.replace('dual_decoder.velocity_projector.', 'decoder.velocity_projector.')
+                velocity_projector_dict[new_key] = value
+            elif key.startswith('dual_decoder.velocity_decoder.'):
+                new_key = key.replace('dual_decoder.velocity_decoder.', 'decoder.velocity_decoder.')
+                velocity_decoder_dict[new_key] = value
+            elif key.startswith('dual_decoder.seismic_projector.'):
+                new_key = key.replace('dual_decoder.seismic_projector.', 'decoder.seismic_projector.')
+                seismic_projector_dict[new_key] = value
+            elif key.startswith('dual_decoder.seismic_decoder.'):
+                new_key = key.replace('dual_decoder.seismic_decoder.', 'decoder.seismic_decoder.')
+                seismic_decoder_dict[new_key] = value
+        
+        # 合并所有权重并加载
+        all_decoder_weights = {
+            **velocity_projector_dict,
+            **velocity_decoder_dict,
+            **seismic_projector_dict,
+            **seismic_decoder_dict
+        }
+        
+        # 报告加载状态
+        loaded_components = []
+        
+        if velocity_projector_dict:
+            loaded_components.append(f"速度投影器 ({len(velocity_projector_dict)} 个参数)")
+        if velocity_decoder_dict:
+            loaded_components.append(f"速度解码器 ({len(velocity_decoder_dict)} 个参数)")
+        if seismic_projector_dict:
+            loaded_components.append(f"地震投影器 ({len(seismic_projector_dict)} 个参数)")
+        if seismic_decoder_dict:
+            loaded_components.append(f"地震解码器 ({len(seismic_decoder_dict)} 个参数)")
+        
+        if all_decoder_weights:
+            try:
+                missing_keys, unexpected_keys = self.load_state_dict(all_decoder_weights, strict=False)
+                print("✅ 解码器权重加载完成:")
+                for component in loaded_components:
+                    print(f"  ✅ {component}")
+                
+                if missing_keys:
+                    print(f"  ⚠️ 缺失的键: {len(missing_keys)}")
+                    # 显示前几个缺失的键
+                    for key in missing_keys[:3]:
+                        print(f"    - {key}")
+                    if len(missing_keys) > 3:
+                        print(f"    - ... 还有 {len(missing_keys) - 3} 个")
+                
+                if unexpected_keys:
+                    print(f"  ⚠️ 意外的键: {len(unexpected_keys)}")
+                    
+            except Exception as e:
+                print(f"❌ 解码器权重加载失败: {e}")
+                # 尝试逐个组件加载
+                self._load_components_individually(
+                    velocity_projector_dict, velocity_decoder_dict,
+                    seismic_projector_dict, seismic_decoder_dict
+                )
+        else:
+            print("⚠️ 未找到任何解码器权重进行加载")
+            print("   请确保检查点文件包含 dual_decoder.* 格式的参数")
+
+    def _load_components_individually(self, velocity_projector_dict, velocity_decoder_dict,
+                                    seismic_projector_dict, seismic_decoder_dict):
+        """逐个组件加载权重（容错机制）"""
+        print("尝试逐个组件加载权重...")
+        
+        components = [
+            ("速度投影器", velocity_projector_dict),
+            ("速度解码器", velocity_decoder_dict),
+            ("地震投影器", seismic_projector_dict),
+            ("地震解码器", seismic_decoder_dict)
+        ]
+        
+        for name, component_dict in components:
+            if component_dict:
+                try:
+                    missing_keys, unexpected_keys = self.load_state_dict(component_dict, strict=False)
+                    print(f"  ✅ {name}: {len(component_dict)} 个参数")
+                except Exception as e:
+                    print(f"  ❌ {name} 加载失败: {e}")
     
     def apply_improved_quantization(self, backend: str = 'qnnpack', 
                                   convert_conv1d: bool = True,
@@ -390,19 +484,115 @@ class QuantizedUBDiff(nn.Module):
         Returns:
             量化分析报告
         """
-        print("=== 应用改进的量化策略 ===")
+        print("=" * 80)
+        print("📊 应用改进的量化策略 - UB-Diff模型分析")
+        print("=" * 80)
         
-        # 分析原始模型
-        original_analysis = analyze_model_quantizability(self)
-        print(f"原始模型统计:")
-        print(f"  总模块数: {original_analysis['total_modules']}")
-        print(f"  可量化模块数: {original_analysis['quantizable_modules']}")
-        print(f"  量化率: {original_analysis['quantization_ratio']:.2%}")
-        print(f"  1D卷积数: {original_analysis['conv1d_modules']}")
+        # 统计数据
+        quantizable_modules = []
+        non_quantizable_modules = []
+        total_params = 0
+        quantizable_params = 0
+        
+        # 量化支持的类型
+        quantizable_types = {
+            nn.Conv1d, nn.Conv2d, nn.Conv3d,
+            nn.ConvTranspose1d, nn.ConvTranspose2d,
+            nn.Linear,
+            nn.BatchNorm1d, nn.BatchNorm2d,
+            nn.ReLU, nn.ReLU6
+        }
+        
+        # 不支持量化的类型
+        non_quantizable_types = {
+            nn.LayerNorm: "LayerNorm不支持量化",
+            nn.GroupNorm: "GroupNorm不支持量化",
+            nn.GELU: "GELU激活函数量化效果差",
+            nn.SiLU: "SiLU激活函数量化效果差", 
+            nn.Tanh: "Tanh激活函数量化精度损失大",
+            nn.Sigmoid: "Sigmoid激活函数量化精度损失大",
+            nn.Dropout: "Dropout层无需量化",
+            nn.AdaptiveAvgPool1d: "自适应池化不支持量化",
+            nn.AdaptiveAvgPool2d: "自适应池化不支持量化"
+        }
+        
+        print("🔍 正在分析模型结构...")
+        
+        # 统计各个模块
+        from collections import defaultdict
+        conv1d_count = 0
+        
+        for name, module in self.named_modules():
+            if len(list(module.children())) == 0:  # 叶子模块
+                module_type = type(module)
+                param_count = sum(p.numel() for p in module.parameters())
+                total_params += param_count
+                
+                if module_type in quantizable_types:
+                    quantizable_modules.append({
+                        'name': name,
+                        'type': module_type.__name__,
+                        'params': param_count
+                    })
+                    quantizable_params += param_count
+                    if isinstance(module, nn.Conv1d):
+                        conv1d_count += 1
+                elif module_type in non_quantizable_types:
+                    non_quantizable_modules.append({
+                        'name': name,
+                        'type': module_type.__name__,
+                        'params': param_count,
+                        'reason': non_quantizable_types[module_type]
+                    })
+        
+        # 统计信息
+        total_modules = len(quantizable_modules) + len(non_quantizable_modules)
+        quantizable_ratio = len(quantizable_modules) / total_modules if total_modules > 0 else 0
+        param_ratio = quantizable_params / total_params if total_params > 0 else 0
+        
+        print(f"\n📈 量化分析结果:")
+        print(f"  总模块数: {total_modules}")
+        print(f"  总参数数: {total_params:,}")
+        print(f"  可量化模块: {len(quantizable_modules)} ({quantizable_ratio:.1%})")
+        print(f"  不可量化模块: {len(non_quantizable_modules)}")
+        print(f"  可量化参数比例: {param_ratio:.1%}")
+        
+        # 分类统计
+        print(f"\n✅ 可量化模块分类:")
+        type_counts = defaultdict(int)
+        type_params = defaultdict(int)
+        
+        for module in quantizable_modules:
+            type_counts[module['type']] += 1
+            type_params[module['type']] += module['params']
+        
+        for module_type, count in type_counts.items():
+            params = type_params[module_type]
+            print(f"  ✓ {module_type}: {count} 个模块, {params:,} 参数")
+        
+        if conv1d_count > 0:
+            print(f"  ⚠️ 发现 {conv1d_count} 个1D卷积，建议转换为2D卷积")
+        
+        print(f"\n❌ 不可量化模块分类:")
+        type_counts = defaultdict(int)
+        type_params = defaultdict(int)
+        
+        for module in non_quantizable_modules:
+            type_counts[module['type']] += 1
+            type_params[module['type']] += module['params']
+        
+        for module_type, count in type_counts.items():
+            params = type_params[module_type]
+            reason = next(r for m, r in non_quantizable_types.items() if m.__name__ == module_type)
+            print(f"  ✗ {module_type}: {count} 个模块, {params:,} 参数 - {reason}")
+        
+        # 实际量化操作
+        total_converted = 0
         
         # 转换1D卷积
-        if convert_conv1d:
-            print("\n转换1D卷积为2D卷积...")
+        if convert_conv1d and conv1d_count > 0:
+            print(f"\n🔄 转换1D卷积为2D卷积...")
+            # 只转换扩散模型部分，因为解码器已经是量化的
             converted_diffusion = convert_conv1d_to_conv2d(self.diffusion)
             converted_unet = convert_conv1d_to_conv2d(self.unet)
             total_converted = converted_diffusion + converted_unet
@@ -411,46 +601,156 @@ class QuantizedUBDiff(nn.Module):
         # 设置量化后端
         torch.backends.quantized.engine = backend
         
-        # 应用量化配置
-        if self.quantize_diffusion:
+        # 应用量化配置（只应用一次）
+        if self.quantize_diffusion and not hasattr(self.diffusion, 'qconfig'):
+            print(f"\n⚙️ 配置量化策略...")
+            print(f"  量化后端: {backend}")
+            print(f"  激进配置: {use_aggressive_config}")
+            
             if use_aggressive_config:
-                print("使用激进的量化配置...")
+                print("  使用激进的量化配置...")
                 # 应用改进的量化策略
                 self.diffusion = apply_improved_quantization(
                     self.diffusion, backend=backend, convert_conv1d=False  # 已经转换过了
                 )
-                self.unet = apply_improved_quantization(
-                    self.unet, backend=backend, convert_conv1d=False
-                )
+                if hasattr(self, 'unet') and self.unet != self.diffusion:
+                    self.unet = apply_improved_quantization(
+                        self.unet, backend=backend, convert_conv1d=False
+                    )
             else:
-                print("使用标准量化配置...")
+                print("  使用标准量化配置...")
                 qconfig = quant.get_default_qat_qconfig(backend)
                 self.diffusion.qconfig = qconfig
-                self.unet.qconfig = qconfig
-                
+                if hasattr(self, 'unet'):
+                    self.unet.qconfig = qconfig
+                    
                 # 准备QAT
                 self.train()
                 quant.prepare_qat(self.diffusion, inplace=True)
-                quant.prepare_qat(self.unet, inplace=True)
+                if hasattr(self, 'unet') and self.unet != self.diffusion:
+                    quant.prepare_qat(self.unet, inplace=True)
+        else:
+            print("\n⚠️ 扩散模型已经配置了量化或未启用量化")
         
-        # 分析改进后的模型
-        improved_analysis = analyze_model_quantizability(self)
-        print(f"\n改进后模型统计:")
-        print(f"  总模块数: {improved_analysis['total_modules']}")
-        print(f"  可量化模块数: {improved_analysis['quantizable_modules']}")
-        print(f"  量化率: {improved_analysis['quantization_ratio']:.2%}")
-        print(f"  1D卷积数: {improved_analysis['conv1d_modules']}")
+        # 重新计算组件级分析（在量化配置应用后）
+        print(f"\n🔍 组件级量化能力:")
         
-        # 计算改进效果
-        if original_analysis['quantization_ratio'] > 0:
-            improvement = improved_analysis['quantization_ratio'] / original_analysis['quantization_ratio']
-            print(f"\n🚀 量化率改进: {improvement:.1f}x")
-        
-        return {
-            'original': original_analysis,
-            'improved': improved_analysis,
-            'converted_conv1d': total_converted if convert_conv1d else 0
+        components = {
+            'decoder': self.decoder
         }
+        
+        # 检查是否有独立的diffusion组件
+        if hasattr(self, 'diffusion') and self.diffusion is not None:
+            components['diffusion'] = self.diffusion
+        
+        # 只有当unet是不同的组件时才添加
+        if hasattr(self, 'unet') and self.unet is not None and self.unet != self.diffusion:
+            components['unet'] = self.unet
+        
+        # 重新定义量化类型（针对可能的QAT量化模块）
+        qat_quantizable_types = quantizable_types.union({
+            # QAT后可能出现的量化模块类型
+            quant.QuantStub,
+            quant.DeQuantStub,
+            type(quant.QuantStub()),
+            type(quant.DeQuantStub())
+        })
+        
+        for comp_name, component in components.items():
+            comp_quantizable = 0
+            comp_total = 0
+            comp_params = 0
+            comp_quantizable_params = 0
+            
+            for name, module in component.named_modules():
+                if len(list(module.children())) == 0:  # 叶子模块
+                    comp_total += 1
+                    module_params = sum(p.numel() for p in module.parameters())
+                    comp_params += module_params
+                    
+                    # 检查是否为量化类型或有qconfig
+                    is_quantizable = (
+                        type(module) in qat_quantizable_types or
+                        hasattr(module, 'qconfig') and module.qconfig is not None or
+                        'quant' in type(module).__name__.lower()
+                    )
+                    
+                    if is_quantizable:
+                        comp_quantizable += 1
+                        comp_quantizable_params += module_params
+            
+            comp_ratio = comp_quantizable / comp_total if comp_total > 0 else 0
+            comp_param_ratio = comp_quantizable_params / comp_params if comp_params > 0 else 0
+            
+            print(f"  📦 {comp_name}:")
+            print(f"    模块: {comp_quantizable}/{comp_total} ({comp_ratio:.1%}) 可量化")
+            print(f"    参数: {comp_quantizable_params:,}/{comp_params:,} ({comp_param_ratio:.1%}) 可量化")
+        
+        # 量化建议和总结
+        print(f"\n💡 量化优化建议:")
+        
+        if conv1d_count > 0 and total_converted > 0:
+            print(f"  ✅ 已转换 {total_converted} 个1D卷积为2D卷积，提升量化兼容性")
+        elif conv1d_count > 0:
+            print(f"  1. 建议转换 {conv1d_count} 个1D卷积为2D卷积，提升量化兼容性")
+        
+        if param_ratio > 0.9:
+            print(f"  2. 模型非常适合量化，预期压缩比: 3-4倍")
+        elif param_ratio > 0.7:
+            print(f"  3. 模型适合量化，预期压缩比: 2-3倍")
+        else:
+            print(f"  4. 模型量化收益有限，考虑重新设计架构")
+        
+        if quantizable_ratio < 0.5:
+            print(f"  5. 建议减少LayerNorm和GELU等不可量化层的使用")
+        
+        # 关键发现
+        print(f"\n🎯 关键发现:")
+        
+        # LayerNorm统计
+        layernorm_count = sum(1 for m in non_quantizable_modules if m['type'] == 'LayerNorm')
+        if layernorm_count > 0:
+            layernorm_params = sum(m['params'] for m in non_quantizable_modules if m['type'] == 'LayerNorm')
+            print(f"  • LayerNorm层: {layernorm_count} 个，{layernorm_params:,} 参数 - 主要性能瓶颈")
+        
+        # GELU统计
+        gelu_count = sum(1 for m in non_quantizable_modules if m['type'] == 'GELU')
+        if gelu_count > 0:
+            print(f"  • GELU激活: {gelu_count} 个 - 建议替换为ReLU以提升量化效果")
+        
+        # SiLU统计
+        silu_count = sum(1 for m in non_quantizable_modules if m['type'] == 'SiLU')
+        if silu_count > 0:
+            print(f"  • SiLU激活: {silu_count} 个 - 量化支持有限")
+        
+        # GroupNorm统计
+        groupnorm_count = sum(1 for m in non_quantizable_modules if m['type'] == 'GroupNorm')
+        if groupnorm_count > 0:
+            groupnorm_params = sum(m['params'] for m in non_quantizable_modules if m['type'] == 'GroupNorm')
+            print(f"  • GroupNorm层: {groupnorm_count} 个，{groupnorm_params:,} 参数 - 建议替换为BatchNorm")
+        
+        print(f"\n🎉 量化策略应用完成！")
+        
+        # 构建返回的分析报告
+        analysis_report = {
+            'total_modules': total_modules,
+            'total_params': total_params,
+            'quantizable_modules': len(quantizable_modules),
+            'quantizable_params': quantizable_params,
+            'quantizable_ratio': quantizable_ratio,
+            'quantizable_param_ratio': param_ratio,
+            'conv1d_count': conv1d_count,
+            'converted_conv1d': total_converted,
+            'non_quantizable_breakdown': {
+                module_type: {
+                    'count': len([m for m in non_quantizable_modules if m['type'] == module_type]),
+                    'params': sum(m['params'] for m in non_quantizable_modules if m['type'] == module_type)
+                }
+                for module_type in set(m['type'] for m in non_quantizable_modules)
+            }
+        }
+        
+        return analysis_report
     
     def prepare_for_qat_training(self, backend: str = 'qnnpack') -> None:
         """为QAT训练准备模型"""

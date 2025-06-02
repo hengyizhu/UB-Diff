@@ -96,12 +96,13 @@ class QATDiffusionTrainer:
             epochs: 训练轮数
             checkpoint_dir: 检查点保存目录
             save_every: 保存检查点的频率
-            validate_every: 验证的频率
+            validate_every: 验证的频率（每多少个epoch验证一次）
         """
         os.makedirs(checkpoint_dir, exist_ok=True)
         
         print("开始训练扩散模型（QAT）...")
         print(f"可训练参数数: {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,}")
+        print(f"验证频率: 每 {validate_every} 个epoch")
         
         for epoch in range(epochs):
             self.current_epoch = epoch
@@ -110,7 +111,7 @@ class QATDiffusionTrainer:
             train_loss = self._train_epoch(train_loader)
             print(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.6f}")
             
-            # 验证阶段
+            # 验证阶段（根据validate_every控制频率）
             if val_loader is not None and (epoch + 1) % validate_every == 0:
                 val_loss = self._validate(val_loader)
                 print(f"Validation Loss: {val_loss:.6f}")
@@ -122,6 +123,26 @@ class QATDiffusionTrainer:
                         os.path.join(checkpoint_dir, 'best_diffusion.pt'),
                         {'val_loss': val_loss}
                     )
+                    print(f"新的最佳扩散模型! Loss: {self.best_loss:.6f}")
+                
+                # WandB记录（包含验证指标）
+                if self.use_wandb:
+                    log_dict = {
+                        'diffusion/train_loss': train_loss,
+                        'diffusion/val_loss': val_loss,
+                        'diffusion/lr': self.scheduler.get_last_lr()[0],
+                        'epoch': epoch
+                    }
+                    wandb.log(log_dict)
+            else:
+                # 只记录训练指标
+                if self.use_wandb:
+                    log_dict = {
+                        'diffusion/train_loss': train_loss,
+                        'diffusion/lr': self.scheduler.get_last_lr()[0],
+                        'epoch': epoch
+                    }
+                    wandb.log(log_dict)
             
             # 学习率调度
             self.scheduler.step()
@@ -132,17 +153,6 @@ class QATDiffusionTrainer:
                     os.path.join(checkpoint_dir, f'diffusion_epoch_{epoch+1}.pt'),
                     {'epoch': epoch+1}
                 )
-            
-            # WandB记录
-            if self.use_wandb:
-                log_dict = {
-                    'diffusion/train_loss': train_loss,
-                    'diffusion/lr': self.scheduler.get_last_lr()[0],
-                    'epoch': epoch
-                }
-                if val_loader is not None and (epoch + 1) % validate_every == 0:
-                    log_dict['diffusion/val_loss'] = val_loss
-                wandb.log(log_dict)
     
     def _train_epoch(self, train_loader: DataLoader) -> float:
         """训练一个epoch"""

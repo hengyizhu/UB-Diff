@@ -34,7 +34,7 @@ def parse_args():
                         help='验证地震数据路径')
     parser.add_argument('--val_label', type=str, default=None,
                         help='验证速度场数据路径')
-    parser.add_argument('--dataset', type=str, default='flatvel-a',
+    parser.add_argument('--dataset', type=str, default='curvefault-a',
                         help='数据集名称')
     
     # 模型参数
@@ -50,11 +50,11 @@ def parse_args():
                         help='速度解码器训练轮数')
     parser.add_argument('--seismic_epochs', type=int, default=50,
                         help='地震解码器训练轮数')
-    parser.add_argument('--lr', type=float, default=1e-4,
+    parser.add_argument('--lr', type=float, default=5e-4,
                         help='学习率')
     parser.add_argument('--weight_decay', type=float, default=1e-4,
                         help='权重衰减')
-    parser.add_argument('--num_workers', type=int, default=4,
+    parser.add_argument('--num_workers', type=int, default=16,
                         help='数据加载线程数')
     
     # 量化参数
@@ -154,6 +154,21 @@ def main():
     # 设置设备
     device = torch.device(args.device)
     
+    # 添加显存管理策略
+    if device.type == 'cuda':
+        print(f"使用GPU: {device}")
+        print(f"GPU总内存: {torch.cuda.get_device_properties(device).total_memory / 1024**3:.2f} GB")
+        
+        # 设置CUDA内存分配策略
+        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+        
+        # 为了避免内存碎片，主动清理缓存
+        torch.cuda.empty_cache()
+        
+        # 建议减小batch size如果显存不足
+        if args.batch_size > 32:
+            print(f"警告: batch_size={args.batch_size} 可能导致显存不足，建议使用32或更小")
+    
     # 初始化WandB
     if args.use_wandb:
         import wandb
@@ -235,7 +250,8 @@ def main():
             train_loader=train_loader,
             val_loader=val_loader,
             epochs=args.velocity_epochs,
-            checkpoint_dir=os.path.join(args.checkpoint_dir, 'velocity')
+            checkpoint_dir=os.path.join(args.checkpoint_dir, 'velocity'),
+            val_every=5  # 每5个epoch验证一次
         )
     
     # 阶段2：训练地震解码器
@@ -246,20 +262,66 @@ def main():
             val_loader=val_loader,
             epochs=args.seismic_epochs,
             checkpoint_dir=os.path.join(args.checkpoint_dir, 'seismic'),
-            freeze_velocity=True
+            freeze_velocity=True,
+            val_every=5  # 每5个epoch验证一次
         )
     
-    # 保存最终模型
-    print("\n保存最终QAT模型...")
+    # 保存最佳组合模型
+    print("\n保存最佳组合QAT模型...")
+    
+    # 确定最佳模型路径
+    best_velocity_path = os.path.join(args.checkpoint_dir, 'velocity', 'best_velocity.pt')
+    best_seismic_path = os.path.join(args.checkpoint_dir, 'seismic', 'best_seismic.pt')
+    
+    best_model_state = None
+    
+    # 如果两个阶段都训练了，使用best_seismic（包含两个阶段的最佳结果）
+    if args.quantize_velocity and args.quantize_seismic and args.velocity_epochs > 0 and args.seismic_epochs > 0:
+        if os.path.exists(best_seismic_path):
+            print(f"加载最佳地震解码器模型: {best_seismic_path}")
+            best_checkpoint = torch.load(best_seismic_path, map_location='cpu')
+            best_model_state = best_checkpoint['model_state_dict']
+        else:
+            print("警告：未找到最佳地震解码器模型，使用当前模型状态")
+            best_model_state = decoder.state_dict()
+    
+    # 如果只训练了速度解码器
+    elif args.quantize_velocity and args.velocity_epochs > 0:
+        if os.path.exists(best_velocity_path):
+            print(f"加载最佳速度解码器模型: {best_velocity_path}")
+            best_checkpoint = torch.load(best_velocity_path, map_location='cpu')
+            best_model_state = best_checkpoint['model_state_dict']
+        else:
+            print("警告：未找到最佳速度解码器模型，使用当前模型状态")
+            best_model_state = decoder.state_dict()
+    
+    # 如果只训练了地震解码器
+    elif args.quantize_seismic and args.seismic_epochs > 0:
+        if os.path.exists(best_seismic_path):
+            print(f"加载最佳地震解码器模型: {best_seismic_path}")
+            best_checkpoint = torch.load(best_seismic_path, map_location='cpu')
+            best_model_state = best_checkpoint['model_state_dict']
+        else:
+            print("警告：未找到最佳地震解码器模型，使用当前模型状态")
+            best_model_state = decoder.state_dict()
+    
+    # 如果都没训练，使用当前状态
+    else:
+        print("警告：没有进行任何解码器训练，保存初始模型状态")
+        best_model_state = decoder.state_dict()
+    
+    # 保存最佳组合模型
     final_checkpoint = {
-        'model_state_dict': decoder.state_dict(),
-        'args': vars(args)
+        'model_state_dict': best_model_state,
+        'args': vars(args),
+        'note': 'Best combined model from QAT training'
     }
     torch.save(
         final_checkpoint,
-        os.path.join(args.checkpoint_dir, 'final_qat_decoders.pt')
+        os.path.join(args.checkpoint_dir, 'best_combined_qat_decoders.pt')
     )
     
+    print(f"最佳组合模型已保存到: {os.path.join(args.checkpoint_dir, 'best_combined_qat_decoders.pt')}")
     print("训练完成！")
 
 

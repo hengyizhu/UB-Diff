@@ -42,7 +42,7 @@ class DiffusionTrainer:
                  gradient_accumulate_every: int = 1,
                  ema_decay: float = 0.995,
                  ema_update_every: int = 10,
-                 save_and_sample_every: int = 1000,
+                 save_and_sample_every: int = 30000,
                  num_samples: int = 25,
                  encoder_dim: int = 512,
                  time_steps: int = 256,
@@ -50,7 +50,12 @@ class DiffusionTrainer:
                  objective: str = 'pred_v',
                  use_wandb: bool = False,
                  wandb_project: str = "UB-Diff",
-                 device: str = "cuda"):
+                 device: str = "cuda",
+                 num_workers: int = 4,
+                 preload: bool = True,
+                 preload_workers: int = 8,
+                 cache_size: int = 32,
+                 use_memmap: bool = False):
         """
         Args:
             seismic_folder: 地震数据文件夹路径
@@ -74,6 +79,11 @@ class DiffusionTrainer:
             use_wandb: 是否使用wandb记录
             wandb_project: wandb项目名称
             device: 训练设备
+            num_workers: 数据加载线程数
+            preload: 是否预加载数据
+            preload_workers: 预加载使用的线程数
+            cache_size: LRU缓存大小
+            use_memmap: 是否使用内存映射
         """
         self.device = torch.device(device)
         self.results_folder = Path(results_folder)
@@ -87,14 +97,20 @@ class DiffusionTrainer:
         self.save_and_sample_every = save_and_sample_every
         self.num_samples = num_samples
         
-        # 加载数据
+        # 加载数据（优化版本）
         self.dataloader, self.dataset_ctx = create_diffusion_dataloader(
             seismic_folder=seismic_folder,
             velocity_folder=velocity_folder,
             dataset_name=dataset_name,
             num_data=num_data,
             batch_size=batch_size,
-            preload=True
+            num_workers=num_workers,
+            preload=preload,
+            preload_workers=preload_workers,
+            cache_size=cache_size,
+            use_memmap=use_memmap,
+            prefetch_factor=4,  # 增加预取因子以减少IO等待
+            persistent_workers=True  # 使用持久worker减少初始化开销
         )
         
         # 创建循环数据加载器
@@ -142,18 +158,22 @@ class DiffusionTrainer:
             for data in dataloader:
                 yield data
 
-    def save(self, milestone: int) -> None:
+    def save(self, milestone: int, is_final: bool = False) -> None:
         """保存模型检查点"""
         data = {
             'step': self.step,
             'model': self.model.state_dict(),
-            'ema': self.ema.state_dict(),
-            'optimizer': self.optimizer.state_dict(),
+            'ema': self.ema.state_dict()
         }
         
-        filepath = self.results_folder / f'model-{milestone}.pt'
-        torch.save(data, str(filepath))
-        print(f"模型已保存: {filepath}")
+        if is_final:
+            # 保存最终最佳模型（使用EMA权重）
+            torch.save(data, str(self.results_folder / 'best_diffusion_model.pt'))
+            print(f"最终最佳模型已保存: {self.results_folder / 'best_diffusion_model.pt'}")
+        else:
+            # 正常的里程碑保存
+            torch.save(data, str(self.results_folder / f'model-{milestone}.pt'))
+            print(f"模型已保存: model-{milestone}.pt")
 
     def load(self, milestone: int) -> None:
         """加载模型检查点"""
@@ -281,6 +301,11 @@ class DiffusionTrainer:
         total_time = time.time() - start_time
         print(f"\n扩散模型训练完成! 总时间: {total_time:.2f}秒")
         
+        # 保存最终最佳模型
+        print("\n保存最终最佳模型...")
+        final_milestone = self.step // self.save_and_sample_every
+        self.save(final_milestone, is_final=True)
+        
         if self.use_wandb:
             wandb.finish()
 
@@ -361,5 +386,10 @@ def create_trainer_from_args(args) -> DiffusionTrainer:
         save_and_sample_every=args.save_and_sample_every,
         encoder_dim=args.latent_dim,
         time_steps=args.time_steps,
-        use_wandb=args.use_wandb
+        use_wandb=args.use_wandb,
+        num_workers=args.workers,
+        preload=not args.no_preload,
+        preload_workers=args.preload_workers,
+        cache_size=args.cache_size,
+        use_memmap=args.use_memmap
     ) 

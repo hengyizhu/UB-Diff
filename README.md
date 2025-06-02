@@ -53,10 +53,10 @@ python scripts/train_encoder_decoder.py \
     --train_data ./CurveFault-A/seismic_data \
     --train_label ./CurveFault-A/velocity_map \
     --dataset curvefault-a \
-    --epochs 10 \
+    --epochs 300 \
     --batch_size 64 \
     --lr 5e-4 \
-    --val_every 2 \
+    --val_every 20 \
     --output_path ./checkpoints/encoder_decoder \
     --device cuda:1 \
     --workers 16 \
@@ -72,11 +72,11 @@ python scripts/finetune_seismic_decoder.py \
     --train_data ./CurveFault-A/seismic_data \
     --train_label ./CurveFault-A/velocity_map \
     --dataset curvefault-a \
-    --checkpoint_path ./checkpoints/encoder_decoder/checkpoint_best.pth \
-    --epochs 4 \
-    --val_every 2 \
+    --checkpoint_path ./checkpoints/encoder_decoder/checkpoint_epoch_300_best.pth \
+    --epochs 100 \
+    --val_every 10 \
     --batch_size 64 \
-    --lr 5e-5 \
+    --lr 5e-4 \
     --output_path ./checkpoints/finetune \
     --device cuda:1 \
     --workers 16 \
@@ -92,8 +92,8 @@ python scripts/train_diffusion.py \
     --train_data ./CurveFault-A/seismic_data \
     --train_label ./CurveFault-A/velocity_map \
     --dataset curvefault-a \
-    --checkpoint_path ./checkpoints/finetune/finetune_checkpoint_best.pth \
-    --num_steps 5000 \
+    --checkpoint_path ./checkpoints/finetune/finetune_checkpoint_epoch_100_best.pth \
+    --num_steps 150000 \
     --batch_size 16 \
     --learning_rate 8e-5 \
     --results_folder ./checkpoints/diffusion \
@@ -116,7 +116,8 @@ python scripts/generate_data.py \
     --evaluate_quality \
     --real_data_path ./CurveFault-A/seismic_data \
     --real_label_path ./CurveFault-A/velocity_map \
-    --device cuda:1
+    --device cuda:1 \
+    --use_wandb
 ```
 
 ## 参数配置

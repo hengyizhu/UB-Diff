@@ -233,40 +233,66 @@ class UBDiff(nn.Module):
             print("编码器权重已加载")
 
     def _load_decoder_weights(self, state_dict: dict) -> None:
-        """加载解码器权重"""
-        # 加载速度解码器
+        """加载解码器权重（仅支持新格式）"""
+        # 收集新格式权重（dual_decoder.*）
+        velocity_projector_dict = {}
         velocity_decoder_dict = {}
-        for key, value in state_dict.items():
-            if key.startswith('decoder_v.'):
-                new_key = key.replace('decoder_v.', '')
-                velocity_decoder_dict[new_key] = value
-            elif key.startswith('fc_v.'):
-                new_key = key.replace('fc_v.', 'fc.')
-                velocity_decoder_dict[new_key] = value
-            elif key.startswith('batch_norm_v.'):
-                new_key = key.replace('batch_norm_v.', 'batch_norm.')
-                velocity_decoder_dict[new_key] = value
-        
-        # 加载地震解码器
+        seismic_projector_dict = {}
         seismic_decoder_dict = {}
+        
         for key, value in state_dict.items():
-            if key.startswith('decoder_s.'):
-                new_key = key.replace('decoder_s.', '')
-                seismic_decoder_dict[new_key] = value
-            elif key.startswith('fc_s.'):
-                new_key = key.replace('fc_s.', 'fc.')
-                seismic_decoder_dict[new_key] = value
-            elif key.startswith('batch_norm_s.'):
-                new_key = key.replace('batch_norm_s.', 'batch_norm.')
+            if key.startswith('dual_decoder.velocity_projector.'):
+                # 直接使用去掉前缀的键名
+                new_key = key.replace('dual_decoder.velocity_projector.', '')
+                velocity_projector_dict[new_key] = value
+            elif key.startswith('dual_decoder.velocity_decoder.'):
+                new_key = key.replace('dual_decoder.velocity_decoder.', '')
+                velocity_decoder_dict[new_key] = value
+            elif key.startswith('dual_decoder.seismic_projector.'):
+                new_key = key.replace('dual_decoder.seismic_projector.', '')
+                seismic_projector_dict[new_key] = value
+            elif key.startswith('dual_decoder.seismic_decoder.'):
+                new_key = key.replace('dual_decoder.seismic_decoder.', '')
                 seismic_decoder_dict[new_key] = value
         
-        # 应用权重
+        # 加载权重到对应模块
+        loaded_components = []
+        
+        if velocity_projector_dict:
+            try:
+                self.dual_decoder.velocity_projector.load_state_dict(velocity_projector_dict, strict=False)
+                loaded_components.append(f"速度投影器 ({len(velocity_projector_dict)} 个参数)")
+            except Exception as e:
+                print(f"速度投影器权重加载失败: {e}")
+        
         if velocity_decoder_dict:
-            # 需要分别加载到projector和decoder
-            print("速度解码器权重已准备")
+            try:
+                self.dual_decoder.velocity_decoder.load_state_dict(velocity_decoder_dict, strict=False)
+                loaded_components.append(f"速度解码器 ({len(velocity_decoder_dict)} 个参数)")
+            except Exception as e:
+                print(f"速度解码器权重加载失败: {e}")
+        
+        if seismic_projector_dict:
+            try:
+                self.dual_decoder.seismic_projector.load_state_dict(seismic_projector_dict, strict=False)
+                loaded_components.append(f"地震投影器 ({len(seismic_projector_dict)} 个参数)")
+            except Exception as e:
+                print(f"地震投影器权重加载失败: {e}")
         
         if seismic_decoder_dict:
-            print("地震解码器权重已准备")
+            try:
+                self.dual_decoder.seismic_decoder.load_state_dict(seismic_decoder_dict, strict=False)
+                loaded_components.append(f"地震解码器 ({len(seismic_decoder_dict)} 个参数)")
+            except Exception as e:
+                print(f"地震解码器权重加载失败: {e}")
+        
+        if loaded_components:
+            print("解码器权重加载完成:")
+            for component in loaded_components:
+                print(f"  ✅ {component}")
+        else:
+            print("⚠️ 未找到任何解码器权重进行加载")
+            print("   请确保检查点文件包含 dual_decoder.* 格式的参数")
 
     def freeze_encoder(self) -> None:
         """冻结编码器参数"""

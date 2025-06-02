@@ -53,7 +53,11 @@ class FinetuneTrainer:
                  lambda_g2v: float = 1.0,
                  use_wandb: bool = False,
                  wandb_project: str = "UB-Diff",
-                 device: str = "cuda"):
+                 device: str = "cuda",
+                 preload: bool = True,
+                 preload_workers: int = 8,
+                 cache_size: int = 32,
+                 use_memmap: bool = False):
         """
         Args:
             seismic_folder: 地震数据文件夹路径
@@ -76,6 +80,10 @@ class FinetuneTrainer:
             use_wandb: 是否使用wandb记录
             wandb_project: wandb项目名称
             device: 训练设备
+            preload: 是否预加载数据
+            preload_workers: 预加载使用的线程数
+            cache_size: LRU缓存大小
+            use_memmap: 是否使用内存映射
         """
         self.device = torch.device(device)
         self.output_path = output_path
@@ -84,7 +92,7 @@ class FinetuneTrainer:
         # 创建输出目录
         os.makedirs(output_path, exist_ok=True)
         
-        # 加载数据
+        # 加载数据（优化版本）
         self.train_loader, self.test_loader, self.paired_loader, self.dataset_ctx = create_dataloaders(
             seismic_folder=seismic_folder,
             velocity_folder=velocity_folder,
@@ -92,7 +100,13 @@ class FinetuneTrainer:
             num_data=num_data,
             paired_num=paired_num,
             batch_size=batch_size,
-            num_workers=num_workers
+            num_workers=num_workers,
+            preload=preload,
+            preload_workers=preload_workers,
+            cache_size=cache_size,
+            use_memmap=use_memmap,
+            prefetch_factor=4,  # 增加预取因子以减少IO等待
+            persistent_workers=True  # 使用持久worker减少初始化开销
         )
         
         # 创建模型并加载预训练权重
@@ -156,6 +170,101 @@ class FinetuneTrainer:
         print(f"微调训练器初始化完成")
         print(f"模型参数统计: {count_parameters(self.model)}")
         print(f"可训练参数统计: {sum(p.numel() for p in trainable_params)}")
+        
+        # 详细参数冻结状态检查
+        self._verify_parameter_freezing()
+
+    def _verify_parameter_freezing(self):
+        """验证参数冻结状态"""
+        print("\n" + "="*50)
+        print("参数冻结状态验证")
+        print("="*50)
+        
+        # 统计各组件的可训练参数
+        encoder_trainable = 0
+        velocity_decoder_trainable = 0
+        seismic_decoder_trainable = 0
+        other_trainable = 0
+        
+        problematic_params = []
+        
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                param_count = param.numel()
+                
+                if 'encoder' in name:
+                    encoder_trainable += param_count
+                    problematic_params.append(f"编码器参数: {name}")
+                elif 'velocity' in name and ('decoder' in name or 'projector' in name):
+                    velocity_decoder_trainable += param_count
+                    problematic_params.append(f"速度解码器参数: {name}")
+                elif 'seismic' in name and ('decoder' in name or 'projector' in name):
+                    seismic_decoder_trainable += param_count
+                else:
+                    other_trainable += param_count
+        
+        print(f"编码器可训练参数: {encoder_trainable:,}")
+        print(f"速度解码器可训练参数: {velocity_decoder_trainable:,}")
+        print(f"地震解码器可训练参数: {seismic_decoder_trainable:,}")
+        print(f"其他可训练参数: {other_trainable:,}")
+        
+        # 检查是否有问题
+        if encoder_trainable > 0 or velocity_decoder_trainable > 0:
+            print("\n❌ 检测到参数冻结问题!")
+            for param_name in problematic_params:
+                if 'encoder' in param_name or 'velocity' in param_name:
+                    print(f"  {param_name}")
+            
+            # 强制重新冻结
+            print("\n🔧 强制重新冻结参数...")
+            self._force_freeze_parameters()
+        else:
+            print("\n✅ 参数冻结状态正确")
+
+    def _force_freeze_parameters(self):
+        """强制冻结应该被冻结的参数"""
+        # 强制冻结编码器
+        for param in self.model.encoder.parameters():
+            param.requires_grad = False
+        
+        # 强制冻结速度解码器和投影器
+        for param in self.model.dual_decoder.velocity_decoder.parameters():
+            param.requires_grad = False
+        for param in self.model.dual_decoder.velocity_projector.parameters():
+            param.requires_grad = False
+        
+        # 强制冻结扩散部分
+        for param in self.model.unet.parameters():
+            param.requires_grad = False
+        for param in self.model.diffusion.parameters():
+            param.requires_grad = False
+        
+        # 重新创建优化器，只包含真正需要训练的参数
+        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+        
+        self.optimizer = torch.optim.AdamW(
+            trainable_params,
+            lr=self.optimizer.param_groups[0]['lr'],
+            weight_decay=self.optimizer.param_groups[0]['weight_decay']
+        )
+        
+        print(f"✅ 重新创建优化器，可训练参数: {sum(p.numel() for p in trainable_params):,}")
+
+    def _ensure_frozen_modules_eval(self):
+        """确保冻结的模块处于eval模式"""
+        # 编码器
+        self.model.encoder.eval()
+        for param in self.model.encoder.parameters():
+            param.requires_grad = False
+        
+        # 速度解码器和投影器
+        self.model.dual_decoder.velocity_decoder.eval()
+        self.model.dual_decoder.velocity_projector.eval()
+        
+        for param in self.model.dual_decoder.velocity_decoder.parameters():
+            param.requires_grad = False
+        for param in self.model.dual_decoder.velocity_projector.parameters():
+            param.requires_grad = False
 
     def compute_loss(self, pred_velocity: torch.Tensor, pred_seismic: torch.Tensor,
                     gt_velocity: torch.Tensor, gt_seismic: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, float]]:
@@ -188,14 +297,8 @@ class FinetuneTrainer:
         """训练一个epoch"""
         self.model.train()
         
-        # 确保编码器和速度解码器保持冻结状态
-        self.model.encoder.eval()
-        for module in self.model.dual_decoder.velocity_decoder.modules():
-            if hasattr(module, 'training'):
-                module.eval()
-        for module in self.model.dual_decoder.velocity_projector.modules():
-            if hasattr(module, 'training'):
-                module.eval()
+        # 强制确保冻结的模块保持冻结状态
+        self._ensure_frozen_modules_eval()
                 
         metric_logger = MetricLogger(delimiter="  ")
         metric_logger.add_meter('lr', SmoothedValue(window_size=1, fmt='{value}'))
@@ -206,8 +309,13 @@ class FinetuneTrainer:
         velocity_tensors = []
         pred_velocity_tensors = []
         
+        # 每个epoch开始时验证参数状态（仅第一个epoch和每10个epoch）
+        if epoch == 0 or (epoch + 1) % 10 == 0:
+            print(f"\nEpoch {epoch + 1} 参数状态检查:")
+            self._quick_param_check()
+        
         # 使用配对数据进行训练
-        for seismic, velocity in metric_logger.log_every(self.paired_loader, print_freq, header):
+        for batch_idx, (seismic, velocity) in enumerate(metric_logger.log_every(self.paired_loader, print_freq, header)):
             start_time = time.time()
             
             seismic = seismic.to(self.device, dtype=torch.float)
@@ -219,9 +327,18 @@ class FinetuneTrainer:
             # 计算损失
             loss, loss_dict = self.compute_loss(pred_velocity, pred_seismic, velocity, seismic)
             
+            # 反向传播前再次确保参数冻结
+            if batch_idx == 0:  # 只在第一个batch检查
+                self._ensure_frozen_modules_eval()
+            
             # 反向传播
             self.optimizer.zero_grad()
             loss.backward()
+            
+            # 检查梯度（可选，仅调试时）
+            if batch_idx == 0 and epoch == 0:
+                self._check_gradients()
+            
             self.optimizer.step()
             self.scheduler.step()
             
@@ -264,8 +381,46 @@ class FinetuneTrainer:
         
         print(f'微调训练 SSIM: {ssim_value.item():.4f}')
         print(f'微调训练 地震损失: {metric_logger.meters["seismic_loss"].global_avg:.4f}')
+        print(f'微调训练 速度损失: {metric_logger.meters["velocity_loss"].global_avg:.4f}')
         
         return epoch_metrics
+
+    def _quick_param_check(self):
+        """快速参数状态检查"""
+        velocity_trainable = sum(p.numel() for name, p in self.model.named_parameters() 
+                               if p.requires_grad and 'velocity' in name and ('decoder' in name or 'projector' in name))
+        encoder_trainable = sum(p.numel() for name, p in self.model.named_parameters() 
+                              if p.requires_grad and 'encoder' in name)
+        seismic_trainable = sum(p.numel() for name, p in self.model.named_parameters() 
+                              if p.requires_grad and 'seismic' in name and ('decoder' in name or 'projector' in name))
+        
+        if velocity_trainable > 0 or encoder_trainable > 0:
+            print(f"⚠️  参数泄漏检测: 编码器={encoder_trainable}, 速度解码器={velocity_trainable}")
+            self._force_freeze_parameters()
+        else:
+            print(f"✅ 参数状态正常: 地震解码器={seismic_trainable}")
+
+    def _check_gradients(self):
+        """检查梯度状态（调试用）"""
+        print("\n首次前向传播梯度检查:")
+        velocity_grads = []
+        seismic_grads = []
+        
+        for name, param in self.model.named_parameters():
+            if param.grad is not None and param.grad.norm() > 1e-8:
+                if 'velocity' in name and ('decoder' in name or 'projector' in name):
+                    velocity_grads.append(name)
+                elif 'seismic' in name and ('decoder' in name or 'projector' in name):
+                    seismic_grads.append(name)
+        
+        if velocity_grads:
+            print(f"❌ 速度解码器有梯度的参数: {len(velocity_grads)}")
+            for name in velocity_grads[:3]:  # 只显示前3个
+                print(f"  {name}")
+        else:
+            print("✅ 速度解码器无梯度")
+        
+        print(f"✅ 地震解码器有梯度的参数: {len(seismic_grads)}")
 
     def evaluate(self, epoch: int) -> Dict[str, float]:
         """评估模型"""
@@ -389,5 +544,9 @@ def create_trainer_from_args(args) -> FinetuneTrainer:
         lambda_g1v=args.lambda_g1v,
         lambda_g2v=args.lambda_g2v,
         use_wandb=args.use_wandb,
-        wandb_project=args.proj_name
+        wandb_project=args.proj_name,
+        preload=args.preload,
+        preload_workers=args.preload_workers,
+        cache_size=args.cache_size,
+        use_memmap=args.use_memmap
     ) 

@@ -20,9 +20,9 @@
 ```bash
 # 使用改进的量化策略运行完整流程
 ./qat_deployment/run_qat_pipeline.sh \
-    --train-data "./CurveFault-A/seismic_data" \
-    --train-label "./CurveFault-A/velocity_map" \
-    --pretrained-path "./checkpoints/diffusion/model-4.pt" \
+    --train_data "./CurveFault-A/seismic_data" \
+    --train_label "./CurveFault-A/velocity_map" \
+    --pretrained_path "./checkpoints/diffusion/model-5.pt" \
     --dataset "curvefault-a"
 ```
 
@@ -32,18 +32,34 @@
 python qat_deployment/scripts/train_qat_decoders.py \
     --train_data "./CurveFault-A/seismic_data" \
     --train_label "./CurveFault-A/velocity_map" \
-    --pretrained_path "./checkpoints/diffusion/model-4.pt" \
-    --quantize_velocity --quantize_seismic
+    --val_data "./CurveFault-A/seismic_data" \
+    --val_label "./CurveFault-A/velocity_map" \
+    --pretrained_path "./checkpoints/diffusion/model-5.pt" \
+    --dataset "curvefault-a" \
+    --quantize_velocity \
+    --quantize_seismic \
+    --velocity_epochs 100 \
+    --seismic_epochs 100 \
+    --backend "qnnpack" \
+    --batch_size 64 \
+    --device cuda:1
 
 # 2. 训练改进的QAT扩散模型
 python qat_deployment/scripts/train_qat_diffusion.py \
     --train_data "./CurveFault-A/seismic_data" \
     --train_label "./CurveFault-A/velocity_map" \
-    --pretrained_path "./checkpoints/diffusion/model-4.pt" \
+    --val_data "./CurveFault-A/seismic_data" \
+    --val_label "./CurveFault-A/velocity_map" \
+    --pretrained_path "./checkpoints/diffusion/model-5.pt" \
     --decoder_checkpoint "./checkpoints/qat_decoders/final_qat_decoders.pt" \
+    --dataset "curvefault-a" \
     --quantize_diffusion \
     --convert_conv1d \
-    --use_aggressive_quantization
+    --use_aggressive_quantization \
+    --backend "qnnpack" \
+    --epochs 100 \
+    --batch_size 16 \
+    --device cuda:1
 
 # 3. 导出优化模型
 python qat_deployment/scripts/export_model.py \

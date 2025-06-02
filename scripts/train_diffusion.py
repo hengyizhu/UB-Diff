@@ -52,7 +52,7 @@ def parse_arguments():
                        help='EMA更新频率')
     
     # 保存和采样参数
-    parser.add_argument('--save_and_sample_every', type=int, default=1000,
+    parser.add_argument('--save_and_sample_every', type=int, default=30000,
                        help='保存和采样频率')
     parser.add_argument('--num_samples', type=int, default=25,
                        help='采样数量（必须是完全平方数）')
@@ -77,6 +77,18 @@ def parse_arguments():
                        help='训练设备')
     parser.add_argument('--seed', type=int, default=42,
                        help='随机种子')
+    parser.add_argument('--workers', type=int, default=8,
+                       help='数据加载线程数')
+    
+    # 数据加载优化参数
+    parser.add_argument('--preload_workers', type=int, default=8,
+                       help='预加载使用的线程数')
+    parser.add_argument('--cache_size', type=int, default=32,
+                       help='LRU缓存大小（当不预加载时使用）')
+    parser.add_argument('--use_memmap', action='store_true',
+                       help='是否使用内存映射（对大文件有效）')
+    parser.add_argument('--no_preload', action='store_true',
+                       help='禁用数据预加载（节省内存）')
     
     # wandb参数
     parser.add_argument('--use_wandb', action='store_true',
@@ -147,7 +159,12 @@ def main():
         objective=args.objective,
         use_wandb=args.use_wandb,
         wandb_project=args.proj_name,
-        device=args.device
+        device=args.device,
+        num_workers=args.workers,
+        preload=not args.no_preload,
+        preload_workers=args.preload_workers,
+        cache_size=args.cache_size,
+        use_memmap=args.use_memmap
     )
     
     # 开始训练

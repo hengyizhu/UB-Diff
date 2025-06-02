@@ -1,7 +1,7 @@
 """
 解码器的量化感知训练器
 
-分阶段训练速度解码器和地震解码器
+分阶段训练速度解码器和地震解码器，包含SSIM评估
 """
 
 import torch
@@ -27,7 +27,7 @@ from .pytorch_ssim import SSIM
 class QATDecoderTrainer:
     """解码器的量化感知训练器
     
-    支持分阶段训练速度解码器和地震解码器
+    支持分阶段训练速度解码器和地震解码器，包含SSIM评估
     """
     
     def __init__(self,
@@ -69,17 +69,19 @@ class QATDecoderTrainer:
         
         # 损失函数
         self.mse_loss = nn.MSELoss()
-        self.ssim_loss = SSIM()
+        self.ssim_calculator = SSIM(window_size=11)
         
         # 训练状态
         self.current_epoch = 0
         self.best_loss = float('inf')
+        self.best_ssim = 0.0
         
     def train_velocity_decoder(self,
                              train_loader: DataLoader,
                              val_loader: Optional[DataLoader] = None,
                              epochs: int = 100,
-                             checkpoint_dir: str = './checkpoints/qat_velocity'):
+                             checkpoint_dir: str = './checkpoints/qat_velocity',
+                             val_every: int = 1):
         """训练速度解码器
         
         Args:
@@ -87,6 +89,7 @@ class QATDecoderTrainer:
             val_loader: 验证数据加载器
             epochs: 训练轮数
             checkpoint_dir: 检查点保存目录
+            val_every: 每多少个epoch进行一次验证
         """
         os.makedirs(checkpoint_dir, exist_ok=True)
         
@@ -102,25 +105,48 @@ class QATDecoderTrainer:
             self.current_epoch = epoch
             
             # 训练阶段
-            train_loss = self._train_epoch_velocity(train_loader)
+            train_metrics = self._train_epoch_velocity(train_loader)
             
-            # 验证阶段
-            if val_loader is not None:
-                val_loss = self._validate_velocity(val_loader)
-                print(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+            # 验证阶段（根据val_every控制频率）
+            if val_loader is not None and (epoch + 1) % val_every == 0:
+                val_metrics = self._validate_velocity(val_loader)
+                print(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_metrics['loss']:.4f}, Train SSIM: {train_metrics['ssim']:.4f}")
+                print(f"Val Loss: {val_metrics['loss']:.4f}, Val SSIM: {val_metrics['ssim']:.4f}")
                 
                 # 学习率调度
-                self.scheduler.step(val_loss)
+                self.scheduler.step(val_metrics['loss'])
                 
-                # 保存最佳模型
-                if val_loss < self.best_loss:
-                    self.best_loss = val_loss
+                # 保存最佳模型（基于loss）
+                if val_metrics['loss'] < self.best_loss:
+                    self.best_loss = val_metrics['loss']
+                    self.best_ssim = val_metrics['ssim']
                     self._save_checkpoint(
                         os.path.join(checkpoint_dir, 'best_velocity.pt'),
-                        {'type': 'velocity', 'val_loss': val_loss}
+                        {'type': 'velocity', 'val_loss': val_metrics['loss'], 'val_ssim': val_metrics['ssim']}
                     )
+                    print(f"新的最佳速度解码器模型! Loss: {self.best_loss:.4f}")
+                
+                # WandB记录
+                if self.use_wandb:
+                    log_dict = {
+                        'velocity/train_loss': train_metrics['loss'],
+                        'velocity/train_ssim': train_metrics['ssim'],
+                        'velocity/val_loss': val_metrics['loss'],
+                        'velocity/val_ssim': val_metrics['ssim'],
+                        'epoch': epoch
+                    }
+                    wandb.log(log_dict)
             else:
-                print(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.4f}")
+                print(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_metrics['loss']:.4f}, Train SSIM: {train_metrics['ssim']:.4f}")
+                
+                # 只记录训练指标
+                if self.use_wandb:
+                    log_dict = {
+                        'velocity/train_loss': train_metrics['loss'],
+                        'velocity/train_ssim': train_metrics['ssim'],
+                        'epoch': epoch
+                    }
+                    wandb.log(log_dict)
             
             # 定期保存检查点
             if (epoch + 1) % 10 == 0:
@@ -128,20 +154,14 @@ class QATDecoderTrainer:
                     os.path.join(checkpoint_dir, f'velocity_epoch_{epoch+1}.pt'),
                     {'type': 'velocity', 'epoch': epoch+1}
                 )
-            
-            # WandB记录
-            if self.use_wandb:
-                log_dict = {'velocity/train_loss': train_loss, 'epoch': epoch}
-                if val_loader is not None:
-                    log_dict['velocity/val_loss'] = val_loss
-                wandb.log(log_dict)
     
     def train_seismic_decoder(self,
                             train_loader: DataLoader,
                             val_loader: Optional[DataLoader] = None,
                             epochs: int = 100,
                             checkpoint_dir: str = './checkpoints/qat_seismic',
-                            freeze_velocity: bool = True):
+                            freeze_velocity: bool = True,
+                            val_every: int = 1):
         """训练地震解码器
         
         Args:
@@ -150,6 +170,7 @@ class QATDecoderTrainer:
             epochs: 训练轮数
             checkpoint_dir: 检查点保存目录
             freeze_velocity: 是否冻结速度解码器
+            val_every: 每多少个epoch进行一次验证
         """
         os.makedirs(checkpoint_dir, exist_ok=True)
         
@@ -165,32 +186,56 @@ class QATDecoderTrainer:
         
         print("开始训练地震解码器（QAT）...")
         
-        # 重置最佳损失
+        # 重置最佳指标
         self.best_loss = float('inf')
+        self.best_ssim = 0.0
         
         for epoch in range(epochs):
             self.current_epoch = epoch
             
             # 训练阶段
-            train_loss = self._train_epoch_seismic(train_loader)
+            train_metrics = self._train_epoch_seismic(train_loader)
             
-            # 验证阶段
-            if val_loader is not None:
-                val_loss = self._validate_seismic(val_loader)
-                print(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+            # 验证阶段（根据val_every控制频率）
+            if val_loader is not None and (epoch + 1) % val_every == 0:
+                val_metrics = self._validate_seismic(val_loader)
+                print(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_metrics['loss']:.4f}, Train SSIM: {train_metrics['ssim']:.4f}")
+                print(f"Val Loss: {val_metrics['loss']:.4f}, Val SSIM: {val_metrics['ssim']:.4f}")
                 
                 # 学习率调度
-                self.scheduler.step(val_loss)
+                self.scheduler.step(val_metrics['loss'])
                 
-                # 保存最佳模型
-                if val_loss < self.best_loss:
-                    self.best_loss = val_loss
+                # 保存最佳模型（基于loss）
+                if val_metrics['loss'] < self.best_loss:
+                    self.best_loss = val_metrics['loss']
+                    self.best_ssim = val_metrics['ssim']
                     self._save_checkpoint(
                         os.path.join(checkpoint_dir, 'best_seismic.pt'),
-                        {'type': 'seismic', 'val_loss': val_loss}
+                        {'type': 'seismic', 'val_loss': val_metrics['loss'], 'val_ssim': val_metrics['ssim']}
                     )
+                    print(f"新的最佳地震解码器模型! Loss: {self.best_loss:.4f}")
+                
+                # WandB记录
+                if self.use_wandb:
+                    log_dict = {
+                        'seismic/train_loss': train_metrics['loss'],
+                        'seismic/train_ssim': train_metrics['ssim'],
+                        'seismic/val_loss': val_metrics['loss'],
+                        'seismic/val_ssim': val_metrics['ssim'],
+                        'epoch': epoch
+                    }
+                    wandb.log(log_dict)
             else:
-                print(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.4f}")
+                print(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_metrics['loss']:.4f}, Train SSIM: {train_metrics['ssim']:.4f}")
+                
+                # 只记录训练指标
+                if self.use_wandb:
+                    log_dict = {
+                        'seismic/train_loss': train_metrics['loss'],
+                        'seismic/train_ssim': train_metrics['ssim'],
+                        'epoch': epoch
+                    }
+                    wandb.log(log_dict)
             
             # 定期保存检查点
             if (epoch + 1) % 10 == 0:
@@ -198,18 +243,13 @@ class QATDecoderTrainer:
                     os.path.join(checkpoint_dir, f'seismic_epoch_{epoch+1}.pt'),
                     {'type': 'seismic', 'epoch': epoch+1}
                 )
-            
-            # WandB记录
-            if self.use_wandb:
-                log_dict = {'seismic/train_loss': train_loss, 'epoch': epoch}
-                if val_loader is not None:
-                    log_dict['seismic/val_loss'] = val_loss
-                wandb.log(log_dict)
     
-    def _train_epoch_velocity(self, train_loader: DataLoader) -> float:
+    def _train_epoch_velocity(self, train_loader: DataLoader) -> Dict[str, float]:
         """训练速度解码器一个epoch"""
         self.model.train()
         total_loss = 0.0
+        total_ssim = 0.0
+        num_batches = 0
         
         for batch_idx, (seismic, velocity) in enumerate(tqdm(train_loader, desc="Training Velocity")):
             seismic = seismic.to(self.device, dtype=torch.float32)
@@ -220,7 +260,6 @@ class QATDecoderTrainer:
                 if self.encoder is not None:
                     z = self.encoder(velocity)
                 else:
-                    # 如果没有编码器，使用随机潜在表示
                     z = torch.randn(velocity.shape[0], 512, 1, 1).to(self.device)
             
             # 前向传播
@@ -235,13 +274,28 @@ class QATDecoderTrainer:
             self.optimizer.step()
             
             total_loss += loss.item()
+            
+            # 计算当前batch的SSIM（避免存储大量数据）
+            with torch.no_grad():
+                batch_ssim = self.ssim_calculator(velocity / 2 + 0.5, velocity_pred / 2 + 0.5)
+                total_ssim += batch_ssim.item()
+                num_batches += 1
+            
+            # 定期清理显存以避免碎片化
+            if (batch_idx + 1) % 50 == 0:
+                torch.cuda.empty_cache()
         
-        return total_loss / len(train_loader)
+        return {
+            'loss': total_loss / len(train_loader),
+            'ssim': total_ssim / num_batches
+        }
     
-    def _train_epoch_seismic(self, train_loader: DataLoader) -> float:
+    def _train_epoch_seismic(self, train_loader: DataLoader) -> Dict[str, float]:
         """训练地震解码器一个epoch"""
         self.model.train()
         total_loss = 0.0
+        total_ssim = 0.0
+        num_batches = 0
         
         for batch_idx, (seismic, velocity) in enumerate(tqdm(train_loader, desc="Training Seismic")):
             seismic = seismic.to(self.device, dtype=torch.float32)
@@ -257,10 +311,8 @@ class QATDecoderTrainer:
             # 前向传播
             _, seismic_pred = self.model(z)
             
-            # 计算损失（MSE + SSIM） - 确保数据类型一致
-            mse = self.mse_loss(seismic_pred, seismic)
-            ssim = 1 - self.ssim_loss(seismic_pred.float(), seismic.float())
-            loss = mse + 0.1 * ssim
+            # 计算损失（只使用MSE进行反向传播）
+            loss = self.mse_loss(seismic_pred, seismic)
             
             # 反向传播
             self.optimizer.zero_grad()
@@ -268,14 +320,29 @@ class QATDecoderTrainer:
             self.optimizer.step()
             
             total_loss += loss.item()
+            
+            # 计算当前batch的SSIM（避免存储大量数据）
+            with torch.no_grad():
+                batch_ssim = self.ssim_calculator(seismic / 2 + 0.5, seismic_pred / 2 + 0.5)
+                total_ssim += batch_ssim.item()
+                num_batches += 1
+            
+            # 定期清理显存以避免碎片化
+            if (batch_idx + 1) % 50 == 0:
+                torch.cuda.empty_cache()
         
-        return total_loss / len(train_loader)
+        return {
+            'loss': total_loss / len(train_loader),
+            'ssim': total_ssim / num_batches
+        }
     
     @torch.no_grad()
-    def _validate_velocity(self, val_loader: DataLoader) -> float:
+    def _validate_velocity(self, val_loader: DataLoader) -> Dict[str, float]:
         """验证速度解码器"""
         self.model.eval()
         total_loss = 0.0
+        total_ssim = 0.0
+        num_batches = 0
         
         for seismic, velocity in val_loader:
             seismic = seismic.to(self.device, dtype=torch.float32)
@@ -293,14 +360,24 @@ class QATDecoderTrainer:
             # 计算损失
             loss = self.mse_loss(velocity_pred, velocity)
             total_loss += loss.item()
+            
+            # 计算当前batch的SSIM
+            batch_ssim = self.ssim_calculator(velocity / 2 + 0.5, velocity_pred / 2 + 0.5)
+            total_ssim += batch_ssim.item()
+            num_batches += 1
         
-        return total_loss / len(val_loader)
+        return {
+            'loss': total_loss / len(val_loader),
+            'ssim': total_ssim / num_batches
+        }
     
     @torch.no_grad()
-    def _validate_seismic(self, val_loader: DataLoader) -> float:
+    def _validate_seismic(self, val_loader: DataLoader) -> Dict[str, float]:
         """验证地震解码器"""
         self.model.eval()
         total_loss = 0.0
+        total_ssim = 0.0
+        num_batches = 0
         
         for seismic, velocity in val_loader:
             seismic = seismic.to(self.device, dtype=torch.float32)
@@ -315,14 +392,19 @@ class QATDecoderTrainer:
             # 前向传播
             _, seismic_pred = self.model(z)
             
-            # 计算损失 - 确保数据类型一致
-            mse = self.mse_loss(seismic_pred, seismic)
-            ssim = 1 - self.ssim_loss(seismic_pred.float(), seismic.float())
-            loss = mse + 0.1 * ssim
-            
+            # 计算损失
+            loss = self.mse_loss(seismic_pred, seismic)
             total_loss += loss.item()
+            
+            # 计算当前batch的SSIM
+            batch_ssim = self.ssim_calculator(seismic / 2 + 0.5, seismic_pred / 2 + 0.5)
+            total_ssim += batch_ssim.item()
+            num_batches += 1
         
-        return total_loss / len(val_loader)
+        return {
+            'loss': total_loss / len(val_loader),
+            'ssim': total_ssim / num_batches
+        }
     
     def _save_checkpoint(self, path: str, metadata: Dict[str, Any]) -> None:
         """保存检查点"""
@@ -332,6 +414,7 @@ class QATDecoderTrainer:
             'scheduler_state_dict': self.scheduler.state_dict(),
             'epoch': self.current_epoch,
             'best_loss': self.best_loss,
+            'best_ssim': self.best_ssim,
             **metadata
         }
         torch.save(checkpoint, path)
@@ -345,6 +428,7 @@ class QATDecoderTrainer:
         self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         self.current_epoch = checkpoint.get('epoch', 0)
         self.best_loss = checkpoint.get('best_loss', float('inf'))
+        self.best_ssim = checkpoint.get('best_ssim', 0.0)
         print(f"检查点已加载: {path}")
         return checkpoint
 

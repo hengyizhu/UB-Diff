@@ -50,7 +50,11 @@ class EncoderDecoderTrainer:
                  lambda_g2v: float = 1.0,
                  use_wandb: bool = False,
                  wandb_project: str = "UB-Diff",
-                 device: str = "cuda"):
+                 device: str = "cuda",
+                 preload: bool = True,
+                 preload_workers: int = 8,
+                 cache_size: int = 32,
+                 use_memmap: bool = False):
         """
         Args:
             seismic_folder: 地震数据文件夹路径
@@ -72,6 +76,10 @@ class EncoderDecoderTrainer:
             use_wandb: 是否使用wandb记录
             wandb_project: wandb项目名称
             device: 训练设备
+            preload: 是否预加载数据
+            preload_workers: 预加载使用的线程数
+            cache_size: LRU缓存大小
+            use_memmap: 是否使用内存映射
         """
         self.device = torch.device(device)
         self.output_path = output_path
@@ -80,7 +88,7 @@ class EncoderDecoderTrainer:
         # 创建输出目录
         os.makedirs(output_path, exist_ok=True)
         
-        # 加载数据
+        # 加载数据（优化版本）
         self.train_loader, self.test_loader, self.paired_loader, self.dataset_ctx = create_dataloaders(
             seismic_folder=seismic_folder,
             velocity_folder=velocity_folder,
@@ -88,7 +96,13 @@ class EncoderDecoderTrainer:
             num_data=num_data,
             paired_num=paired_num,
             batch_size=batch_size,
-            num_workers=num_workers
+            num_workers=num_workers,
+            preload=preload,
+            preload_workers=preload_workers,
+            cache_size=cache_size,
+            use_memmap=use_memmap,
+            prefetch_factor=4,  # 增加预取因子以减少IO等待
+            persistent_workers=True  # 使用持久worker减少初始化开销
         )
         
         # 创建模型

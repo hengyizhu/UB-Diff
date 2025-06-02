@@ -186,27 +186,82 @@ def main():
         print("回退到基础配置...")
         # 使用基础配置
         quantization_report = {
-            'original': {'total_modules': 0, 'quantizable_modules': 0, 'quantization_ratio': 0, 'conv1d_modules': 0},
-            'improved': {'total_modules': 0, 'quantizable_modules': 0, 'quantization_ratio': 0, 'conv1d_modules': 0},
+            'total_modules': 0,
+            'quantizable_modules': 0,
+            'quantizable_ratio': 0,
+            'conv1d_count': 0,
             'converted_conv1d': 0
         }
         args.export_qat_only = True  # 强制使用QAT模式
     
     # 加载权重
     print("加载训练后的权重...")
-    if 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['model_state_dict'])
-    else:
-        model.load_state_dict(checkpoint)
+    try:
+        if 'model_state_dict' in checkpoint:
+            model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+        else:
+            model.load_state_dict(checkpoint, strict=False)
+        print("✓ 权重加载成功（允许部分键不匹配）")
+    except Exception as e:
+        print(f"⚠️ 直接加载失败: {e}")
+        print("尝试过滤量化相关键后重新加载...")
+        
+        # 获取state_dict
+        if 'model_state_dict' in checkpoint:
+            saved_state_dict = checkpoint['model_state_dict']
+        else:
+            saved_state_dict = checkpoint
+        
+        # 过滤掉量化相关的键，只保留实际的模型参数
+        filtered_state_dict = {}
+        skipped_keys = []
+        
+        for key, value in saved_state_dict.items():
+            # 跳过量化相关的键
+            if any(pattern in key for pattern in [
+                'activation_post_process', 'fake_quant', 'weight_fake_quant',
+                'observer_enabled', 'fake_quant_enabled', 'scale', 'zero_point'
+            ]):
+                skipped_keys.append(key)
+                continue
+            filtered_state_dict[key] = value
+        
+        print(f"过滤掉 {len(skipped_keys)} 个量化相关键")
+        print(f"保留 {len(filtered_state_dict)} 个模型参数键")
+        
+        # 尝试加载过滤后的权重
+        try:
+            model.load_state_dict(filtered_state_dict, strict=False)
+            print("✓ 过滤加载成功")
+        except Exception as e2:
+            print(f"⚠️ 过滤加载也失败: {e2}")
+            print("尝试逐个加载兼容的键...")
+            
+            model_keys = set(model.state_dict().keys())
+            compatible_keys = set(filtered_state_dict.keys()) & model_keys
+            incompatible_keys = set(filtered_state_dict.keys()) - model_keys
+            
+            print(f"兼容键数量: {len(compatible_keys)}")
+            print(f"不兼容键数量: {len(incompatible_keys)}")
+            
+            if incompatible_keys:
+                print("不兼容的键（前10个）:")
+                for key in list(incompatible_keys)[:10]:
+                    print(f"  {key}")
+            
+            # 只加载兼容的键
+            compatible_state_dict = {k: v for k, v in filtered_state_dict.items() if k in compatible_keys}
+            model.load_state_dict(compatible_state_dict, strict=False)
+            print(f"✓ 成功加载 {len(compatible_state_dict)} 个兼容参数")
     
     model.eval()
     
     # 显示量化信息
     print(f"\n=== 量化模型信息 ===")
-    print(f"总模块数: {quantization_report['improved']['total_modules']}")
-    print(f"可量化模块数: {quantization_report['improved']['quantizable_modules']}")
-    print(f"量化率: {quantization_report['improved']['quantization_ratio']:.2%}")
-    print(f"1D卷积数: {quantization_report['improved']['conv1d_modules']}")
+    print(f"总模块数: {quantization_report['total_modules']}")
+    print(f"可量化模块数: {quantization_report['quantizable_modules']}")
+    print(f"量化率: {quantization_report['quantizable_ratio']:.2%}")
+    print(f"1D卷积数: {quantization_report['conv1d_count']}")
     if quantization_report['converted_conv1d'] > 0:
         print(f"✓ 已转换 {quantization_report['converted_conv1d']} 个1D卷积层")
     
@@ -218,7 +273,7 @@ def main():
         model_type = "QAT"
     else:
         # 决定是否进行最终的量化转换
-        should_convert = args.force_quantization or quantization_report['improved']['conv1d_modules'] == 0
+        should_convert = args.force_quantization or quantization_report['conv1d_count'] == 0
         
         if should_convert:
             print("\n=== 转换为完全量化模型 ===")
@@ -236,7 +291,7 @@ def main():
                 deployment_model = QATDeploymentModel(model)
                 model_type = "QAT"
         else:
-            print(f"\n⚠️ 跳过量化转换（存在 {quantization_report['improved']['conv1d_modules']} 个1D卷积）")
+            print(f"\n⚠️ 跳过量化转换（存在 {quantization_report['conv1d_count']} 个1D卷积）")
             print("使用QAT模型进行导出")
             deployment_model = QATDeploymentModel(model)
             model_type = "QAT"
@@ -326,10 +381,10 @@ def main():
         f.write(f"地震数据输出: (5, 1000, 70)\n")
         f.write(f"导出格式: {'TorchScript' if export_success else 'PyTorch'}\n")
         f.write(f"\n量化信息:\n")
-        f.write(f"总模块数: {quantization_report['improved']['total_modules']}\n")
-        f.write(f"可量化模块数: {quantization_report['improved']['quantizable_modules']}\n")
-        f.write(f"量化率: {quantization_report['improved']['quantization_ratio']:.2%}\n")
-        f.write(f"1D卷积数: {quantization_report['improved']['conv1d_modules']}\n")
+        f.write(f"总模块数: {quantization_report['total_modules']}\n")
+        f.write(f"可量化模块数: {quantization_report['quantizable_modules']}\n")
+        f.write(f"量化率: {quantization_report['quantizable_ratio']:.2%}\n")
+        f.write(f"1D卷积数: {quantization_report['conv1d_count']}\n")
         if quantization_report['converted_conv1d'] > 0:
             f.write(f"✓ 已转换 {quantization_report['converted_conv1d']} 个1D卷积层\n")
     

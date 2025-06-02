@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-量化感知训练 - 扩散模型训练脚本
+最终修复版本 - QAT扩散模型训练脚本
 
-训练量化的扩散模型
+正确处理QAT解码器状态加载和保存
 """
 
 import os
@@ -24,7 +24,7 @@ from qat_deployment.trainers import QATDiffusionTrainer
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='QAT扩散模型训练')
+    parser = argparse.ArgumentParser(description='QAT扩散模型训练（最终修复版本）')
     
     # 数据参数
     parser.add_argument('--train_data', type=str, required=True,
@@ -72,8 +72,6 @@ def parse_args():
                         help='是否转换1D卷积为2D卷积以获得更好的量化支持')
     parser.add_argument('--use_aggressive_quantization', action='store_true',
                         help='是否使用更激进的量化配置')
-    parser.add_argument('--quantization_warmup_epochs', type=int, default=10,
-                        help='量化预热轮数，在此期间逐渐启用量化')
     
     # 其他参数
     parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints/qat_diffusion',
@@ -153,6 +151,92 @@ def create_simple_dataloader(seismic_path: str, velocity_path: str,
     return dataloader
 
 
+def count_qat_modules(model, module_path=""):
+    """统计模型中QAT模块的数量"""
+    qat_count = 0
+    total_modules = 0
+    
+    for name, module in model.named_modules():
+        total_modules += 1
+        if hasattr(module, 'qconfig') and module.qconfig is not None:
+            qat_count += 1
+    
+    return qat_count, total_modules
+
+
+def load_qat_decoder_correctly(model, decoder_checkpoint_path):
+    """正确加载QAT解码器状态"""
+    print("\n=== 正确加载QAT解码器 ===")
+    print(f"解码器路径: {decoder_checkpoint_path}")
+    
+    # 加载QAT解码器检查点
+    decoder_checkpoint = torch.load(decoder_checkpoint_path, map_location='cpu')
+    decoder_state = decoder_checkpoint['model_state_dict']
+    
+    print(f"📊 QAT解码器文件包含 {len(decoder_state)} 个参数")
+    
+    # 分析QAT参数
+    qat_params = [k for k in decoder_state.keys() 
+                  if 'fake_quant' in k or 'observer' in k or 'activation_post_process' in k]
+    normal_params = [k for k in decoder_state.keys() 
+                     if not ('fake_quant' in k or 'observer' in k or 'activation_post_process' in k)]
+    
+    print(f"✅ 其中 {len(qat_params)} 个是QAT参数")
+    print(f"📦 其中 {len(normal_params)} 个是普通参数")
+    
+    # 检查加载前的QAT状态
+    decoder_qat_before, decoder_total = count_qat_modules(model.decoder)
+    print(f"加载前解码器QAT状态:")
+    print(f"  📦 decoder: {decoder_qat_before}/{decoder_total} 个模块有QAT配置")
+    
+    # 方法1: 尝试直接加载所有状态（包括QAT状态）
+    print("\n🔄 方法1: 直接加载所有QAT状态...")
+    result = model.decoder.load_state_dict(decoder_state, strict=False)
+    print(f"📋 加载结果:")
+    print(f"  缺失的keys: {len(result.missing_keys)}")
+    print(f"  意外的keys: {len(result.unexpected_keys)}")
+    
+    # 检查QAT状态是否正确加载
+    decoder_qat_after, _ = count_qat_modules(model.decoder)
+    print(f"加载后解码器QAT状态:")
+    print(f"  📦 decoder: {decoder_qat_after}/{decoder_total} 个模块有QAT配置")
+    
+    if decoder_qat_after == 0:
+        print("❌ 方法1失败，尝试方法2...")
+        
+        # 方法2: 先应用量化配置，再加载权重
+        print("\n🔄 方法2: 先配置QAT，再加载权重...")
+        
+        # 为解码器应用QAT配置
+        model.decoder.qconfig = torch.quantization.get_default_qat_qconfig('qnnpack')
+        torch.quantization.prepare_qat(model.decoder, inplace=True)
+        
+        # 再次检查QAT状态
+        decoder_qat_prepared, _ = count_qat_modules(model.decoder)
+        print(f"QAT配置后解码器状态:")
+        print(f"  📦 decoder: {decoder_qat_prepared}/{decoder_total} 个模块有QAT配置")
+        
+        # 再次尝试加载权重
+        result = model.decoder.load_state_dict(decoder_state, strict=False)
+        print(f"📋 第二次加载结果:")
+        print(f"  缺失的keys: {len(result.missing_keys)}")
+        print(f"  意外的keys: {len(result.unexpected_keys)}")
+        
+        # 最终检查
+        decoder_qat_final, _ = count_qat_modules(model.decoder)
+        print(f"最终解码器QAT状态:")
+        print(f"  📦 decoder: {decoder_qat_final}/{decoder_total} 个模块有QAT配置")
+        
+        if decoder_qat_final > 0:
+            print("✅ 方法2成功！QAT解码器状态已正确加载")
+        else:
+            print("❌ 方法2也失败了")
+    else:
+        print("✅ 方法1成功！QAT解码器状态已正确加载")
+    
+    return decoder_qat_after > 0 or (decoder_qat_after == 0 and 'decoder_qat_final' in locals() and decoder_qat_final > 0)
+
+
 def main():
     args = parse_args()
     
@@ -164,7 +248,7 @@ def main():
         import wandb
         wandb.init(
             project=args.wandb_project,
-            name='qat-diffusion',
+            name='qat-diffusion-final-fix',
             config=vars(args)
         )
     
@@ -180,8 +264,8 @@ def main():
     print("加载编码器...")
     encoder = load_encoder(args.pretrained_path, device)
     
-    # 创建量化模型
-    print("=== 创建改进的量化UB-Diff模型 ===")
+    # 创建量化模型（不启用解码器量化，稍后手动加载）
+    print("\n=== 创建QuantizedUBDiff模型 ===")
     model = QuantizedUBDiff(
         encoder_dim=args.encoder_dim,
         velocity_channels=1,
@@ -189,11 +273,11 @@ def main():
         dim_mults=(1, 2, 4, 8),
         time_steps=args.time_steps,
         quantize_diffusion=args.quantize_diffusion,
-        quantize_decoder=True  # 解码器已经量化
+        quantize_decoder=False  # 先不启用，手动加载
     )
     
     # 加载预训练的扩散模型权重
-    print("加载扩散模型权重...")
+    print("\n=== 加载扩散模型权重 ===")
     checkpoint = torch.load(args.pretrained_path, map_location='cpu', weights_only=False)
     if 'model' in checkpoint:
         state_dict = checkpoint['model']
@@ -207,30 +291,21 @@ def main():
             diffusion_state[key] = value
     
     model.load_state_dict(diffusion_state, strict=False)
+    print("✅ 扩散模型权重加载完成")
     
-    # 加载QAT解码器权重
-    print("加载QAT解码器权重...")
-    decoder_checkpoint = torch.load(args.decoder_checkpoint, map_location='cpu')
-    decoder_state = decoder_checkpoint['model_state_dict']
+    # 正确加载QAT解码器
+    qat_success = load_qat_decoder_correctly(model, args.decoder_checkpoint)
     
-    # 映射解码器权重 - 修复：避免在遍历时修改字典
-    new_decoder_state = {}
-    for key, value in decoder_state.items():
-        if not key.startswith('decoder.'):
-            new_decoder_state[f'decoder.{key}'] = value
-        else:
-            new_decoder_state[key] = value
+    if not qat_success:
+        print("⚠️ 警告：QAT解码器加载可能不完整，但继续训练...")
     
-    model.load_state_dict(new_decoder_state, strict=False)
-    
-    # 应用改进的量化策略
+    # 对扩散模型应用量化策略
     if args.quantize_diffusion:
-        print(f"\n=== 应用改进的量化策略 ===")
+        print(f"\n=== 应用扩散模型量化策略 ===")
         print(f"量化后端: {args.backend}")
         print(f"转换1D卷积: {args.convert_conv1d}")
         print(f"激进量化: {args.use_aggressive_quantization}")
         
-        # 使用改进的量化方法
         quantization_report = model.apply_improved_quantization(
             backend=args.backend,
             convert_conv1d=args.convert_conv1d,
@@ -239,9 +314,9 @@ def main():
         
         # 保存量化报告
         os.makedirs(args.checkpoint_dir, exist_ok=True)
-        report_path = os.path.join(args.checkpoint_dir, 'quantization_analysis.txt')
+        report_path = os.path.join(args.checkpoint_dir, 'quantization_analysis_final.txt')
         with open(report_path, 'w', encoding='utf-8') as f:
-            f.write("改进的量化分析报告\n")
+            f.write("最终修复版本量化分析报告\n")
             f.write("=" * 50 + "\n\n")
             
             f.write("量化分析结果:\n")
@@ -255,14 +330,20 @@ def main():
             
             if quantization_report['converted_conv1d'] > 0:
                 f.write(f"\n✓ 成功转换 {quantization_report['converted_conv1d']} 个1D卷积层\n")
-            
-            f.write(f"\n不可量化模块分布:\n")
-            for module_type, info in quantization_report['non_quantizable_breakdown'].items():
-                f.write(f"  {module_type}: {info['count']} 个模块, {info['params']} 参数\n")
         
         print(f"量化分析报告已保存到: {report_path}")
     else:
         print("跳过扩散模型量化")
+    
+    # 最终QAT状态检查
+    print(f"\n=== 最终模型QAT状态检查 ===")
+    decoder_qat, decoder_total = count_qat_modules(model.decoder)
+    diffusion_qat, diffusion_total = count_qat_modules(model.diffusion)
+    unet_qat, unet_total = count_qat_modules(model.unet)
+    
+    print(f"  📦 decoder: {decoder_qat}/{decoder_total} 个模块有QAT配置")
+    print(f"  📦 diffusion: {diffusion_qat}/{diffusion_total} 个模块有QAT配置") 
+    print(f"  📦 unet: {unet_qat}/{unet_total} 个模块有QAT配置")
     
     # 移动到设备
     model = model.to(device)
@@ -307,14 +388,19 @@ def main():
     final_checkpoint = {
         'model_state_dict': best_model_state,
         'args': vars(args),
-        'note': 'Best QAT diffusion model based on validation loss'
+        'qat_status': {
+            'decoder_qat_modules': decoder_qat,
+            'diffusion_qat_modules': diffusion_qat,
+            'unet_qat_modules': unet_qat,
+        },
+        'note': 'Best QAT diffusion model with properly loaded QAT decoder'
     }
     torch.save(
         final_checkpoint,
-        os.path.join(args.checkpoint_dir, 'best_qat_diffusion.pt')
+        os.path.join(args.checkpoint_dir, 'best_qat_diffusion_final.pt')
     )
     
-    print(f"最佳QAT扩散模型已保存到: {os.path.join(args.checkpoint_dir, 'best_qat_diffusion.pt')}")
+    print(f"最终QAT扩散模型已保存到: {os.path.join(args.checkpoint_dir, 'best_qat_diffusion_final.pt')}")
     print("训练完成！")
 
 

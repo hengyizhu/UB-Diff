@@ -32,7 +32,7 @@ def parse_arguments():
                        help='数据集名称')
     parser.add_argument('--checkpoint_path', type=str, required=True,
                        help='预训练编码器-解码器检查点路径')
-    parser.add_argument('--num_data', type=int, default=24000,
+    parser.add_argument('--num_data', type=int, default=48000,
                        help='训练数据数量')
     parser.add_argument('--paired_num', type=int, default=5000,
                        help='配对数据数量')
@@ -76,6 +76,16 @@ def parse_arguments():
                        help='数据加载线程数')
     parser.add_argument('--seed', type=int, default=42,
                        help='随机种子')
+    
+    # 数据加载优化参数
+    parser.add_argument('--preload_workers', type=int, default=8,
+                       help='预加载使用的线程数')
+    parser.add_argument('--cache_size', type=int, default=32,
+                       help='LRU缓存大小（当不预加载时使用）')
+    parser.add_argument('--use_memmap', action='store_true',
+                       help='是否使用内存映射（对大文件有效）')
+    parser.add_argument('--no_preload', action='store_true',
+                       help='禁用数据预加载（节省内存）')
     
     # wandb参数
     parser.add_argument('--use_wandb', action='store_true',
@@ -134,7 +144,11 @@ def main():
         lambda_g2v=args.lambda_g2v,
         use_wandb=args.use_wandb,
         wandb_project=args.proj_name,
-        device=args.device
+        device=args.device,
+        preload=not args.no_preload,
+        preload_workers=args.preload_workers,
+        cache_size=args.cache_size,
+        use_memmap=args.use_memmap
     )
     
     # 开始微调
